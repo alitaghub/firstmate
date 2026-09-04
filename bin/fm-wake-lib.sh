@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared durable wake queue and portable lock helpers.
+# Shared durable wake queue, portable lock, and private-state-root helpers.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
@@ -13,7 +13,55 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
-mkdir -p "$STATE"
+
+# --- private state root ------------------------------------------------------
+#
+# state/ and the records under it are captain-private (AGENTS.md section 2), and
+# bin/fm-procevent.sh refuses a state root any other account can write to. A
+# plain `mkdir -p` leaves that guarantee to whatever umask the operator happens
+# to have: a home first created under umask 002 gets a group-writable state root
+# and every process-event command refuses it from then on, with no way back
+# except a manual chmod. Code that needs a directory to be private has to create
+# it private, so this library owns creating the state root and every other
+# creator calls fm_private_dir_ensure rather than mkdir.
+#
+# Tightening only ever removes group and other write. A healthy 755 state root
+# from an ordinary umask 022 home is left exactly as it is; only a mode the
+# privacy contract actually rejects is changed. Whether to refuse a directory
+# that cannot be healed stays with the validator that owns that decision
+# (fm_procevent_private_directory_valid in bin/fm-procevent-lib.sh), which is
+# why tightening here is best effort: only an owner may chmod, and a directory
+# belonging to someone else is not this library's to repair or to reject.
+
+# Create each directory, and any missing parent, owner-only. An existing
+# directory is tightened rather than recreated. Returns non-zero if a directory
+# could not be created, matching the `mkdir -p` this replaces.
+fm_private_dir_ensure() {  # <dir>...
+  local dir status=0
+  for dir in "$@"; do
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+      if ! (umask 077; mkdir -p "$dir"); then
+        status=1
+        continue
+      fi
+    fi
+    fm_private_dir_tighten "$dir"
+  done
+  return "$status"
+}
+
+# Remove group and other write from an existing real directory. Never widens a
+# mode, never follows a symlink, and never fails the caller: see the header.
+fm_private_dir_tighten() {  # <dir>...
+  local dir
+  for dir in "$@"; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    chmod go-w "$dir" 2>/dev/null || true
+  done
+  return 0
+}
+
+fm_private_dir_ensure "$STATE"
 
 # Most wake-library consumers need only queue and lock primitives, including
 # deliberately minimal recovery fixtures and remote installations.

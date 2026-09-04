@@ -104,7 +104,7 @@ else
   [ "${#PROJECT_NAMES[@]}" -gt 0 ] || die "at least one project or --no-projects is required"
 fi
 
-mkdir -p "$STATE" || die "cannot create parent state directory"
+fm_private_dir_ensure "$STATE" || die "cannot create parent state directory"
 REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
 fm_lock_acquire_wait "$REGISTRY_LOCK" || die "cannot lock the secondmate registry"
 REGISTRY_LOCK_HELD=1

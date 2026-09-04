@@ -90,6 +90,9 @@ MAX_LINE=1000
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# Loaded for fm_private_dir_ensure: it owns creating the state root private.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -843,7 +846,7 @@ action_arm() {
     printf 'fm-tool-update-check: %s (%s)\n' "$CONFIG_PROBLEM" "$CONFIG" >&2
     return 1
   fi
-  mkdir -p "$STATE" || return 1
+  fm_private_dir_ensure "$STATE" || return 1
   case "$FM_HOME" in
     /*) home=$FM_HOME ;;
     *)
