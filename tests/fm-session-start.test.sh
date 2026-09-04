@@ -510,16 +510,40 @@ SH
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
 run_session_start() {
-  local home=$1 root=$2 path=$3 pi_harness=${4:-}
+  local home=$1 root=$2 path=$3 pi_harness=${4:-} bash_env=${5:-/dev/null}
   if [ -n "$pi_harness" ]; then
     env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" BASH_ENV="$bash_env" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" BASH_ENV="$bash_env" \
       "$SESSION_START"
   fi
+}
+
+# Hide a tool from the whole session-start tree and echo the BASH_ENV file that
+# does it. Deleting the stub out of the fakebin is not enough on its own: the
+# base PATH these cases keep for real coreutils also carries a distribution
+# node, git, tmux and jq, so on any machine that has one the tool stays
+# resolvable and the MISSING diagnostic the case is about never fires. Every
+# bash in the tree sources BASH_ENV, so the override reaches fm-bootstrap.sh
+# wherever session start invokes it.
+hide_tool() {  # <case-dir> <tool>
+  local dir=$1 tool=$2 bash_env
+  bash_env="$dir/no-$tool.bash"
+  cat > "$bash_env" <<SH
+command() {
+  if [ "\${1:-}" = -v ] && [ "\${2:-}" = $tool ]; then
+    return 1
+  fi
+  builtin command "\$@"
+}
+$tool() {
+  return 127
+}
+SH
+  printf '%s\n' "$bash_env"
 }
 
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
@@ -945,7 +969,7 @@ SH
 # read-once contract arrives before the payload it governs.
 test_output_ordering_diagnostics_lead() {
   local rec root home fakebin out lock_line boot_line wake_line read_once_line
-  local context_line fleet_line next_line inventory_line missing_line
+  local context_line fleet_line next_line inventory_line missing_line no_node
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -954,11 +978,12 @@ EOF
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
+  no_node=$(hide_tool "$home" node)
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH" "" "$no_node")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1350,7 +1375,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin out no_node
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1358,11 +1383,12 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  no_node=$(hide_tool "$home" node)
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH" "" "$no_node")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
