@@ -1065,6 +1065,10 @@ x_mode_setup() {
     fi
   }
 
+  # Load the state-root owner here rather than relying on another function
+  # having run first: this path is reached whether or not the sync sweeps ran.
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_private_dir_ensure "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
   case "$FM_HOME" in
