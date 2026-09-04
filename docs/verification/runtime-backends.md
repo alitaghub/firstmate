@@ -278,6 +278,126 @@ This change does not address that warning and does not claim to.
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Claude permission-rule precedence
+
+Verified 2026-09-04 on Claude Code 2.1.260, against a real operator configuration whose user-level `~/.claude/settings.json` carries `permissions.ask` entries for `Bash(git rebase *)` and `Bash(git reset --hard *)`.
+The question this record settles is whether a firstmate-launched worker can be granted an operation that a user-level `ask` rule gates.
+It cannot, by any grant mechanism the CLI or the hook protocol exposes.
+
+Every arm below ran in a scratch git repository, on the probe command `git rebase --quit` with no rebase in progress, which matches the live `ask` pattern exactly while changing nothing.
+
+```sh
+claude -p --dangerously-skip-permissions --model haiku --output-format json <arm-specific flags> \
+  "Run exactly this bash command and then report the tool result verbatim: git rebase --quit"
+```
+
+| Grant mechanism attempted | Result |
+| --- | --- |
+| `--dangerously-skip-permissions` alone (`permission_mode: bypassPermissions`) | gated |
+| `--settings '{"permissions":{"allow":["Bash(git rebase *)"]}}'` | gated |
+| `--settings '{"permissions":{"ask":[],"allow":["Bash(git rebase *)"]}}'` | gated |
+| `--allowedTools 'Bash(git rebase *)'` | gated |
+| worktree `.claude/settings.local.json` with `permissions.allow` | gated |
+| PreToolUse hook returning `permissionDecision: "allow"` | gated |
+| `--permission-mode dontAsk` | gated |
+| `allow` and `ask` for the same pattern inside one settings source | gated |
+| `--setting-sources project,local` | **ran** |
+
+Each gated arm reported the same shape, with the tool call recorded in `permission_denials` and never executed.
+
+```text
+permission_denials: [{"tool_name": "Bash", "tool_input": {"command": "git rebase --quit", ...}}]
+```
+
+Three of those results carry more weight than the rest.
+
+A settings `allow` never overrides a matching `ask`, and the losing layer is not the reason.
+The two were placed in one settings source together and the `ask` still won, so this is rule-type precedence rather than settings-layer precedence.
+`permissions.ask` also cannot be cleared from a higher-precedence source, because permission rule arrays are merged as a union across sources rather than replaced.
+
+A PreToolUse hook cannot waive an `ask` rule either, and its failure is silent.
+The hook fired, received `"permission_mode":"bypassPermissions"`, and returned `permissionDecision: "allow"`, and the command was still gated.
+
+```text
+HOOK_FIRED {"hook_event_name":"PreToolUse","tool_name":"Bash","permission_mode":"bypassPermissions",...}
+DECIDED_ALLOW
+permission_denials: [{"tool_name":"Bash","tool_input":{"command":"git rebase --quit",...}}]
+```
+
+That hook mechanism does work in general, which is what makes the negative result specific rather than a broken probe.
+A control pair on `chmod 644 a.txt` under `--permission-mode default`, a command no rule matches, was gated without the hook and ran with it.
+So a hook `allow` can supply a missing approval, and cannot withdraw an explicit `ask`.
+
+Only `--setting-sources project,local` released the command, by excluding the user settings file from the merge so its `ask` entries never enter the rule set at all.
+
+```text
+result: fatal: No rebase in progress?  (exit 128)
+```
+
+`--settings` remains an independent source alongside that exclusion, so the excluded user layer can be re-supplied in derived form.
+This was observed rather than assumed: with `--setting-sources project,local --settings <derived copy of the user settings>`, the derived file's own `ask` entry still gated `git clean -f -n`, its `statusLine` rendered, and its PreToolUse hooks ran.
+
+### Interactive confirmation
+
+The print-mode arms above establish precedence; a crewmate pane is interactive, so both ends were re-observed there on the same date and version.
+Each arm launched into a pre-registered linked worktree under tmux 3.4 on Linux, the way `bin/fm-spawn.sh` launches one.
+
+The control arm used today's launch command and reproduced the reported wedge exactly, with the pane parked on an unanswerable dialog.
+
+```text
+● Bash(git rebase --quit)
+  ⎿  Waiting…
+
+ Permission rule Bash(git rebase *) requires confirmation for this command.
+ /permissions to update rules
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+```
+
+The treatment arm added `--setting-sources project,local --settings <derived>` and ran the same command with no dialog.
+
+```text
+● Bash(git rebase --quit)
+  ⎿  Error: Exit code 128
+     fatal: No rebase in progress?
+● DONE
+```
+
+### Operator-hook interference with `ask` rules
+
+One further result belongs beside the precedence table, because it changes what an `ask` rule is worth in any session.
+A PreToolUse hook that rewrites a command through `updatedInput` moves the command out of its own `ask` pattern, because the permission match is applied to the rewritten command.
+
+The operator configuration under test routes Bash through a token-proxy hook that rewrites some git subcommands.
+
+```sh
+printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push --force origin nosuchbranch"}}' | rtk hook claude
+```
+
+```text
+{"hookSpecificOutput":{"permissionDecisionReason":"RTK auto-rewrite","updatedInput":{"command":"rtk git push --force origin nosuchbranch"}}}
+```
+
+| Configured `ask` rule | Rewritten by the hook | Gates in practice |
+| --- | --- | --- |
+| `Bash(git push --force *)` | yes | no |
+| `Bash(git push -f *)` | yes | no |
+| `Bash(git reset --hard *)` | no | yes |
+| `Bash(git clean -f *)` | no | yes |
+| `Bash(git rebase *)` | no | yes |
+
+The two rewritten rules were confirmed inert against the unmodified operator configuration, with no firstmate flags in play: `git push --force origin nosuchbranch` executed with an empty `permission_denials`, while the same pattern in an isolated settings source with no rewriting hook gated correctly.
+This is a property of the operator's own configuration rather than of any firstmate change, and it is recorded here because a rule that reads as a guard while never firing is worth knowing about before relying on it.
+
+### Standing of this record
+
+No firstmate behavior currently depends on this table, because the grant it evaluates was not implemented.
+There is therefore no live-harness guard in the `live-harness-optin` family for it yet, and none is claimed.
+If a future change makes a spawn depend on `--setting-sources`, that change owes both tests the harness-dependent rule requires: a portable regression pinning the derived-settings construction with no harness, and an env-gated live guard that re-runs the control and treatment arms above against every installed Claude and fails naming the harness and version.
+Until then these are point-in-time observations of a vendor surface, so re-run the arms after a Claude Code upgrade rather than trusting the table indefinitely.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
