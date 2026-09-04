@@ -16,12 +16,15 @@ Give the captain a concise session-only recap without gathering fresh state.
 1. Inspect only conversation or session history already visible to the current first mate.
 2. Find the most recent real captain-authored message before the current `/ahoy` invocation.
    A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.
-   Exclude a marked operational injection only when its full marker prefix begins at the very first character of the whole message, and exclude the unmarked legacy session-start payload only as a literal whole-message match.
-   `bin/fm-operational-input.sh` owns both marker prefixes - `FM_OPERATIONAL_PREFIX` for a current injection and `FM_LEGACY_AWAY_PREFIX` for a legacy bare-marker away-mode injection - and the legacy session-start payload `FM_LEGACY_SESSIONSTART`; read all three there rather than from memory.
-   A message stays a captain boundary whenever the full prefix does not begin at its first character or the payload is not the whole message, including a message that only starts with the marker's leading character, carries the label without its marker, or quotes, embeds, or adds any text around either form.
+   Exclude messages that begin with the current U+2063 `FIRSTMATE_OP:` injection prefix.
+   Exclude legacy bare-marker away-mode injections only when U+2063 is immediately followed by `Supervisor escalate (`.
+   Exclude the exact legacy unmarked session-start payload ``Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.``
    Custom-role messages such as Pi's `firstmate-sessionstart-nudge` are not captain messages.
    System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.
    Never infer captain authorship merely because a synthetic message appears in the user-role transcript.
+   Do not exclude an ordinary captain message merely because it begins with U+2063 followed by other text, contains ASCII `FIRSTMATE_OP:` without a leading U+2063, quotes or embeds a current operational message after ordinary captain text, quotes or mentions the legacy session-start payload, or adds any text to that payload.
+   Apply the current exclusion only when U+2063 `FIRSTMATE_OP:` begins at the first character of the whole message.
+   Apply the legacy startup exclusion as a literal whole-message match.
 3. If no prior real captain message exists, load [`../bearings/SKILL.md`](../bearings/SKILL.md) and follow it exactly.
    Bearings alone owns its gathering, artifact, and response contract.
    Do not restate that contract or combine a session recap with Bearings output.
