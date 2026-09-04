@@ -7,6 +7,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v npm >/dev/null 2>&1 || { echo "skip: npm not found for Pi extension typecheck"; exit 0; }
 command -v tsc >/dev/null 2>&1 || { echo "skip: tsc not found for Pi extension typecheck"; exit 0; }
 
+# The tsconfig below sets allowImportingTsExtensions, and the installed Pi
+# package's typebox declarations use const type parameters; both are TypeScript
+# 5.0 features. An older tsc reports its own parse errors, not ours, so gate on
+# the version the same way this file gates on the tool being present at all.
+TSC_VERSION=$(tsc --version 2>/dev/null | sed -n 's/^Version \([0-9][0-9.]*\).*/\1/p')
+if [ -z "$TSC_VERSION" ]; then
+  echo "skip: could not read the installed TypeScript version for Pi extension typecheck"
+  exit 0
+fi
+if ! [ "${TSC_VERSION%%.*}" -ge 5 ] 2>/dev/null; then
+  echo "skip: TypeScript $TSC_VERSION is older than the 5.0 this Pi extension typecheck requires"
+  exit 0
+fi
+
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g)/@earendil-works/pi-coding-agent"}
 if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
   echo "skip: installed @earendil-works/pi-coding-agent package not found"
