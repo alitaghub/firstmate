@@ -11,3 +11,6 @@ __pycache__/
 *.pyc
 .env
 config/
+
+# Local CodeGraph index (machine-local runtime state)
+.codegraph/
