@@ -17,7 +17,7 @@ Give the captain a concise session-only recap without gathering fresh state.
 2. Find the most recent real captain-authored message before the current `/ahoy` invocation.
    A captain boundary is an ordinary user-role message unless it matches one of the narrow operational exclusions below.
    Exclude a marked operational injection only when its full marker prefix begins at the very first character of the whole message, and exclude the unmarked legacy session-start payload only as a literal whole-message match.
-   `bin/fm-operational-input.sh` owns both marker prefixes and that legacy payload; read them there rather than from memory.
+   `bin/fm-operational-input.sh` owns both marker prefixes - `FM_OPERATIONAL_PREFIX` for a current injection and `FM_LEGACY_AWAY_PREFIX` for a legacy bare-marker away-mode injection - and the legacy session-start payload `FM_LEGACY_SESSIONSTART`; read all three there rather than from memory.
    A message stays a captain boundary whenever the full prefix does not begin at its first character or the payload is not the whole message, including a message that only starts with the marker's leading character, carries the label without its marker, or quotes, embeds, or adds any text around either form.
    Custom-role messages such as Pi's `firstmate-sessionstart-nudge` are not captain messages.
    System, developer, tool, watcher, guard, away-mode, and other injected operational messages are not captain messages.
