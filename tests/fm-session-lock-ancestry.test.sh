@@ -260,7 +260,8 @@ make_primary_home() {  # <dir>
 #!/usr/bin/env bash
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
   i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  while [ "$i" -lt 200 ] && \
+    [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "${FM_FIXTURE_LAUNCHER:-0}" ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -273,7 +274,8 @@ SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
 i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+while [ "$i" -lt 200 ] && \
+  [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" = "${FM_FIXTURE_LAUNCHER:-0}" ]; do
   sleep 0.05
   i=$((i + 1))
 done
@@ -285,17 +287,24 @@ SH
 }
 
 # Start the fixture tree detached from this suite's own process tree: the
-# launcher exits immediately, so the tree is reparented to init and the ancestry
-# walk terminates inside the fixture. Returns once the hook has recorded its exit
-# code.
+# launcher exits immediately, the tree is reparented away from it, and the
+# ancestry walk terminates inside the fixture. Returns once the hook has recorded
+# its exit code.
+#
+# The tree waits to lose the launcher as its parent, not to gain init as one. An
+# orphan only reaches PID 1 where nothing else claims it: a host running systemd
+# as a child subreaper (a systemd user session, systemd under WSL, a container
+# with an init shim) reparents it to that reaper instead, so waiting for ppid 1
+# spent the full 10s ceiling on a condition that could never become true and left
+# the hook barely 3s of the 20s budget below.
 run_fixture_tree() {  # <dir> <session-bin> [<daemon-bin>]
   local dir=$1 session_bin=$2 daemon_bin=${3:-} i
   if [ -n "$daemon_bin" ]; then
     FM_HOME="$dir" FM_SESSION_BIN="$session_bin" FM_FIXTURE_ORPHAN_HERE=0 \
-      bash -c '"$0" "$1" &' "$daemon_bin" "$dir/daemon.sh"
+      bash -c 'FM_FIXTURE_LAUNCHER=$$ "$0" "$1" &' "$daemon_bin" "$dir/daemon.sh"
   else
     FM_HOME="$dir" FM_FIXTURE_ORPHAN_HERE=1 \
-      bash -c '"$0" "$1" &' "$session_bin" "$dir/session.sh"
+      bash -c 'FM_FIXTURE_LAUNCHER=$$ "$0" "$1" &' "$session_bin" "$dir/session.sh"
   fi
   i=0
   while [ "$i" -lt 400 ] && [ ! -s "$dir/state/hook.rc" ]; do
