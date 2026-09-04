@@ -391,12 +391,82 @@ printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"c
 The two rewritten rules were confirmed inert against the unmodified operator configuration, with no firstmate flags in play: `git push --force origin nosuchbranch` executed with an empty `permission_denials`, while the same pattern in an isolated settings source with no rewriting hook gated correctly.
 This is a property of the operator's own configuration rather than of any firstmate change, and it is recorded here because a rule that reads as a guard while never firing is worth knowing about before relying on it.
 
-### Standing of this record
+### The implemented worker grant
 
-No firstmate behavior currently depends on this table, because the grant it evaluates was not implemented.
-There is therefore no live-harness guard in the `live-harness-optin` family for it yet, and none is claimed.
-If a future change makes a spawn depend on `--setting-sources`, that change owes both tests the harness-dependent rule requires: a portable regression pinning the derived-settings construction with no harness, and an env-gated live guard that re-runs the control and treatment arms above against every installed Claude and fails naming the harness and version.
-Until then these are point-in-time observations of a vendor surface, so re-run the arms after a Claude Code upgrade rather than trusting the table indefinitely.
+`bin/fm-spawn.sh` launches a claude crewmate or scout with `--setting-sources project,local` and a derived `--settings` copy of the launching user's own settings, because the table above leaves no other control.
+The derivation removes exactly the ask rules for `git rebase` and `git reset --hard`, the two operations a generated ship brief runs, and keeps every other rule, so an operator's force-push and `git clean -f` guards still gate a worker.
+A secondmate keeps the plain user-settings launch.
+
+Three facts were re-verified end to end on 2026-09-04, on Claude Code 2.1.260, against the real operator configuration and the real derived artifact a worker loads.
+The artifact came from a real `fm-spawn` run against a fake pane and an isolated home, reading a copy of that configuration; its `permissions.ask` came back as the operator's list minus `Bash(git reset --hard *)`, with all 67 `allow` rules, all 8 `deny` rules and `defaultMode` carried through and `feedbackDrafts` forced off.
+The operator's list held `Bash(git reset --hard *)` but no longer held `Bash(git rebase *)` at this date, so `git reset --hard` is the granted operation the arms exercise.
+Both probes change nothing even when they run: no rebase is in progress, and the reset ref does not exist, so git refuses before touching the worktree.
+
+```sh
+claude -p --dangerously-skip-permissions --model haiku --output-format json <arm-specific flags> \
+  "Run exactly this bash command and then report the tool result verbatim: <probe>"
+```
+
+| Fact | Arm | Probe | Result |
+| --- | --- | --- | --- |
+| A user `ask` rule gates a launch that grants the same pattern | `--settings '{"permissions":{"allow":["Bash(git reset --hard *)"]}}'` | `git reset --hard refs/fm-live-guard-nosuchref` | gated |
+| The worker flags release the operation the brief requires | `--setting-sources project,local --settings <derived>` | `git reset --hard refs/fm-live-guard-nosuchref` | ran |
+| `--settings` is still loaded, so a retained rule still gates | `--setting-sources project,local --settings <derived>` | `git clean -f -n` | gated |
+
+```text
+armA  gated=true   denials=["git reset --hard refs/fm-live-guard-nosuchref"]
+armB  gated=false  result=fatal: ambiguous argument 'refs/fm-live-guard-nosuchref': unknown revision or path not in the working tree.
+armC  gated=true   denials=["git clean -f -n"]
+```
+
+The third arm is not a courtesy check.
+`claude --help` records that in print mode a settings file failing validation is silently ignored with no error, so a positive gate from a rule the derivation kept is what proves the derived file was actually loaded rather than skipped.
+
+`--setting-sources <sources>` and `--settings <file-or-json>` are both documented in `claude --help` at this version, so a Claude too old to accept the flag rejects the launch with `error: unknown option` rather than starting a worker that would freeze.
+
+Both tests the harness-dependent rule requires are in place.
+`tests/fm-claude-worker-permissions.test.sh` pins the derivation and the launch shape with real processes and no harness, including the refusals for malformed settings and for an ask rule broader than the grant.
+`tests/fm-claude-worker-permissions-live-e2e.test.sh` re-runs the three arms above and is the command that refreshes this record:
+
+```sh
+FM_CLAUDE_LIVE_E2E=1 bash tests/fm-claude-worker-permissions-live-e2e.test.sh
+```
+
+It fails naming the harness and version, and reports an absent granted ask rule or an unavailable retained-rule probe as an explicit skip rather than a pass over an unchecked fact.
+Run it after every Claude Code upgrade; the table above is a point-in-time observation of a vendor surface, not a standing guarantee.
+
+### What excluding the user source also costs
+
+`--setting-sources` selects settings sources, but the `user` source also carries the user-level skills, commands, and configured plugins, so excluding it removes those from the launched session as well.
+Measured on the same date and version from the harness's own `system`/`init` enumeration, not from a model's self-report:
+
+```sh
+claude -p --dangerously-skip-permissions --model haiku --output-format stream-json --verbose <arm-specific flags> hi
+```
+
+| Launch | Slash commands enumerated | `no-mistakes` present |
+| --- | --- | --- |
+| `--settings '{"feedbackDrafts":"off"}'` (the launch before this change) | 148 | yes |
+| `--setting-sources project,local --settings <derived>` | 66 | no |
+
+Eighty-two entries are lost and none are gained.
+The project's own `.claude/skills` survive, so a firstmate-repo worker still reaches this repo's agent-only skills; what disappears is everything under the user's own `~/.claude/skills` and `~/.claude/commands` plus the plugins configured in user settings, `no-mistakes`, `resolving-merge-conflicts`, `tdd`, `unslop`, `research`, and the `review:` and `standup:` plugin commands among them.
+
+The print-mode arms establish the enumeration; a crewmate pane is interactive, so both ends were re-observed there on the same date and version, in one already-trusted checkout under tmux on Linux.
+Asked whether a skill named `no-mistakes` was available, the pane on the pre-change launch answered `FOUND` and the pane on the worker launch answered `MISSING`, so this is a real loss in the shape a crewmate runs in rather than a print-mode artifact.
+
+`--plugin-dir` partially compensates and is not a fix.
+Loading the user config directory as a session plugin restored the user skills but renamed every one of them under the directory's basename, so `no-mistakes` became `.claude:no-mistakes`, and the user-configured plugins stayed absent:
+
+| Launch | Slash commands | `no-mistakes` | `.claude:no-mistakes` |
+| --- | --- | --- | --- |
+| `--setting-sources project,local --plugin-dir ~/.claude` | 132 | no | yes |
+
+Firstmate's generated ship briefs invoke `/no-mistakes` by that exact name, so this cost lands on the delivery path rather than on a convenience.
+
+One limit of the derivation belongs beside this.
+Matching is exact on a rule's command prefix, so `Bash(git rebase *)`, `Bash(git rebase:*)` and `Bash(git rebase)` are all recognised while a rule that wildcards the middle of a command, such as `Bash(git * --hard)`, has no prefix to compare and is neither removed nor detected.
+A rule broader than the grant, such as `Bash(git *)`, is detected and refuses the spawn naming what it still gates, because removing it would drop guards outside the grant and keeping it would leave a worker that freezes.
 
 ## Composer classification matrix
 

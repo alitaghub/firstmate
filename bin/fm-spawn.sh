@@ -179,6 +179,9 @@
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
+#     __CLAUDESETTINGS__ firstmate-derived per-task claude settings file, loaded beside
+#                  --setting-sources project,local so an operator permissions.ask rule
+#                  cannot park a crewmate or scout pane on an unanswerable dialog
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -203,6 +206,11 @@
 # and every refusal; a failed registration stops this spawn rather than launching
 # a worker that would wedge on the dialog. A --secondmate launch never runs it,
 # so a claude secondmate home keeps its own one-time trust decision.
+# A non-secondmate claude launch also writes state/<task-id>.claude-settings.json, a
+# firstmate-derived copy of the captain's own Claude settings with the two git ask
+# rules a ship brief must run removed, and loads it beside --setting-sources
+# project,local. derive_claude_worker_settings below owns that derivation and its
+# refusals; the claude launch_template branch owns why no other grant works.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -1271,13 +1279,40 @@ launch_template() {
     # feedback flow (the SendFeedback tool), deliberately layered so a fleet-launched
     # agent never queues or submits a bug-report draft on the captain's behalf even
     # under a managed Claude settings policy: CLAUDE_CODE_SEND_FEEDBACK=0 is read
-    # directly and is not subject to managed-settings precedence, while --settings
-    # '{"feedbackDrafts":"off"}' sets the documented settings key (Claude Code
-    # changelog 2.1.247) that a managed policy CAN override back on. Either control
-    # alone disables the feature; keep both so a managed override of one still
-    # leaves the other in force. Both are per-launch, scoped to this invocation only,
-    # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # directly and is not subject to managed-settings precedence, while the
+    # feedbackDrafts settings key (Claude Code changelog 2.1.247), which a managed
+    # policy CAN override back on, is set through --settings. Either control alone
+    # disables the feature; keep both so a managed override of one still leaves the
+    # other in force. Both are per-launch and never touch the captain's own settings.
+    #
+    # A CREWMATE or SCOUT additionally drops the USER settings source and re-supplies
+    # a firstmate-derived copy of it. A `permissions.ask` rule in the launching user's
+    # own settings parks an unattended pane on a confirmation dialog firstmate cannot
+    # answer, and the operator rules for `git rebase` and `git reset --hard` gate two
+    # operations every generated ship brief runs, so the pane freezes mid-delivery.
+    # NO grant overrides an ask rule: a settings `allow` loses to it even in the same
+    # source, rule arrays merge as a union across sources so `ask` cannot be cleared
+    # from a higher-precedence one, --allowedTools loses, and a PreToolUse hook
+    # returning `allow` loses silently (docs/verification/runtime-backends.md,
+    # "Claude permission-rule precedence"). --setting-sources project,local is the one
+    # control that works, by keeping the user file out of the rule set entirely, and
+    # --settings stays an independent source alongside it, so the captain's own
+    # configuration is re-supplied minus exactly those two rules; every other ask rule
+    # he keeps, force-push and `git clean -f` included, still gates a worker.
+    # derive_claude_worker_settings below owns that derivation and refuses rather than
+    # launch a worker whose guards it could not reproduce. The worktree's own
+    # settings.local.json carries the busy-state hooks and stays in the `local` source.
+    # A claude too old for --setting-sources (documented in `claude --help` at 2.1.260)
+    # rejects the launch with `error: unknown option` rather than starting a worker
+    # that would freeze; a SECONDMATE keeps the plain user-settings launch, since it is
+    # a firstmate instance operating its own home rather than a briefed worker.
+    claude)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --setting-sources project,local --settings __CLAUDESETTINGS__ __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2643,6 +2678,101 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
+# The firstmate-derived Claude settings a crewmate or scout launch loads instead
+# of the captain's own user settings file, written to <state>/<id>.claude-settings.json
+# and reached through --settings beside --setting-sources project,local. The claude
+# launch_template branch above owns why that pair is the only control that keeps an
+# operator `permissions.ask` rule from parking an unattended pane.
+#
+# The derivation is a copy of the captain's user settings with exactly the ask rules
+# for the two git operations a generated ship brief requires removed, so his own
+# statusLine, hooks, env and every other guard still reach the worker. Matching is
+# EXACT on the rule's command prefix: `Bash(git rebase *)`, `Bash(git rebase:*)` and
+# `Bash(git rebase)` are the same prefix and are dropped, while a narrower rule such
+# as `Bash(git rebase --onto *)` does not gate the worker's own rebase and is kept.
+# A rule BROADER than the grant, such as `Bash(git *)`, cannot be removed without
+# also dropping guards the captain kept, so it refuses the spawn naming the rule
+# rather than launching a worker that would still freeze. A pattern that wildcards
+# the MIDDLE of a command (`Bash(git * --hard)`) has no command prefix to compare and
+# is neither dropped nor detected; that case is a known limit of this matcher.
+#
+# Refusing on an unreadable or malformed settings file is deliberate. Launching
+# anyway would drop the whole user layer and leave the worker with no ask rules at
+# all, which is wider than the grant and silent, so the one outcome worth avoiding.
+# An ABSENT file is not that case: there are no rules to lose, and the derived copy
+# is just the feedback-draft control.
+derive_claude_worker_settings() {  # <user-settings-file> <out-file>
+  local src=$1 out=$2 err
+  command -v node >/dev/null 2>&1 || {
+    echo "error: node is required to derive the worker Claude settings and was not found on PATH" >&2
+    return 1
+  }
+  err=$(node - "$src" "$out" <<'NODE'
+const fs = require("node:fs");
+const [src, out] = process.argv.slice(2);
+// The git operations every generated ship brief requires: the rebase onto the
+// default branch before the PR, and the branch-moving reset.
+const REQUIRED = ["git rebase", "git reset --hard"];
+const commandPrefix = (rule) => {
+  const m = /^Bash\((.*)\)$/.exec(rule.trim());
+  if (!m) return null;
+  return m[1].replace(/\*$/, "").replace(/[:\s]+$/, "").trim().replace(/\s+/g, " ");
+};
+const gates = (prefix) => REQUIRED.filter((op) => op === prefix || op.startsWith(prefix + " "));
+let raw;
+try {
+  raw = fs.readFileSync(src, "utf8");
+} catch (e) {
+  if (e.code !== "ENOENT") {
+    process.stderr.write(`cannot read ${src}: ${e.message}`);
+    process.exit(1);
+  }
+}
+let derived = {};
+if (raw !== undefined) {
+  try {
+    derived = JSON.parse(raw);
+  } catch (e) {
+    process.stderr.write(`${src} is not valid JSON: ${e.message}`);
+    process.exit(1);
+  }
+  if (derived === null || typeof derived !== "object" || Array.isArray(derived)) {
+    process.stderr.write(`${src} is not a JSON object`);
+    process.exit(1);
+  }
+}
+const perms = derived.permissions;
+if (perms !== null && typeof perms === "object" && !Array.isArray(perms) && Array.isArray(perms.ask)) {
+  const kept = [];
+  for (const rule of perms.ask) {
+    const prefix = typeof rule === "string" ? commandPrefix(rule) : null;
+    if (prefix === null) {
+      kept.push(rule);
+      continue;
+    }
+    if (REQUIRED.includes(prefix)) continue;
+    const blocked = gates(prefix);
+    if (blocked.length > 0) {
+      process.stderr.write(
+        `ask rule ${JSON.stringify(rule)} is broader than the worker grant: it still gates ${blocked.join(" and ")}, ` +
+          `and removing it would also drop guards outside that grant`,
+      );
+      process.exit(1);
+    }
+    kept.push(rule);
+  }
+  derived.permissions = { ...perms, ask: kept };
+}
+derived.feedbackDrafts = "off";
+fs.writeFileSync(out, JSON.stringify(derived) + "\n", { mode: 0o600 });
+NODE
+  ) || {
+    echo "error: could not derive worker Claude settings from $src: ${err:-unknown failure}; refusing to launch a worker that would either freeze on a confirmation prompt or run with the captain's guards dropped" >&2
+    return 1
+  }
+  return 0
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -2726,6 +2856,19 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
+      # The worker settings copy that lets --setting-sources project,local drop
+      # the captain's user file without dropping his configuration with it.
+      # KIND is already non-secondmate here, matching the launch_template branch
+      # that consumes the placeholder; a raw launch command carries no
+      # placeholder, so it keeps its own unmodified settings resolution.
+      if [ "$RAW_LAUNCH" -eq 0 ]; then
+        if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+          claude_user_settings="$CLAUDE_CONFIG_DIR/settings.json"
+        else
+          claude_user_settings="${HOME:-}/.claude/settings.json"
+        fi
+        derive_claude_worker_settings "$claude_user_settings" "$STATE_REAL/$ID.claude-settings.json" || exit 1
+      fi
       ;;
     gemini)
       if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -3160,6 +3303,7 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
   pi|pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
   cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+  claude) LAUNCH=${LAUNCH//__CLAUDESETTINGS__/"$(shell_quote "$STATE_REAL/$ID.claude-settings.json")"} ;;
   gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
