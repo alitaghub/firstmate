@@ -99,7 +99,10 @@ POLL_LIMIT=50
 # The count carries the increase rather than the interval so an ordinary wifi
 # blip is still noticed within 5s of the network returning.
 MAX_TRANSPORT_FAILURES=8
-TRANSPORT_BACKOFF=5
+# The interval alone is overridable so the tests that drive the counter to
+# exhaustion do not have to sit through the real wait; the count stays fixed so
+# production keeps outlasting the 30s a 429 states.
+TRANSPORT_BACKOFF=${FM_TELEGRAM_TRANSPORT_BACKOFF:-5}
 # Seconds a refusal reply may spend on its one sendMessage. Stated outright, not
 # as a fallback: sourcing bin/fm-telegram-lib.sh has already set
 # FM_TELEGRAM_TIMEOUT to the long poll's 70, so a `:-` default would never

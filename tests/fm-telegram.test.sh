@@ -35,7 +35,10 @@ FAKE_TOKEN='123456789:AAFakeTokenForTestsOnly_not-real'
 new_home() {
   local home allow=${1-}
   home=$(mktemp -d "$TMP_ROOT/home.XXXXXX")
-  mkdir -p "$home/state" "$home/config"
+  # A real home's state/ is private, and fm-procevent.sh refuses to bind a state
+  # root that is group- or world-writable. Create it under a fixed umask so the
+  # fixture matches that contract whatever umask the suite is run with.
+  (umask 077; mkdir -p "$home/state" "$home/config")
   printf 'FM_TELEGRAM_TOKEN=%s\n' "$FAKE_TOKEN" > "$home/.env"
   if [ -n "$allow" ]; then
     printf '%s\n' "$allow" > "$home/config/telegram-allow"
@@ -410,7 +413,9 @@ test_an_unreachable_network_keeps_the_channel_listening() {
   local home fakebin out
   home=$(new_home)
   fakebin=$(fake_telegram_unreachable "$home")
-  export FM_TELEGRAM_TEST_CALLS="$home/calls"
+  # The poll spends every one of its retries here; the production interval only
+  # costs wall clock, so shorten it rather than sit through 35s of real sleep.
+  export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TRANSPORT_BACKOFF=1
 
   FM_HOME="$home" PATH="$fakebin:$PATH" "$ADAPTER" arm >/dev/null || fail 'arming failed'
   out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 180 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
@@ -421,7 +426,7 @@ test_an_unreachable_network_keeps_the_channel_listening() {
     'the channel did not re-arm after a transport failure, so the next message would never arrive'
   [ -s "$home/state/.wake-queue" ] && fail 'a transport blip woke firstmate'
   [ "$(note_count "$home")" = 0 ] || fail 'an unreachable poll queued a note'
-  unset FM_TELEGRAM_TEST_CALLS
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TRANSPORT_BACKOFF
   pass 'an unreachable network re-arms and keeps listening instead of stopping'
 }
 
@@ -451,10 +456,10 @@ SH
 run_one_capture() {
   local home=$1 fakebin=$2 out
   export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TEST_FIRST="$home/first-response.json" \
-    FM_TELEGRAM_TEST_STATUS="$home/first-status"
+    FM_TELEGRAM_TEST_STATUS="$home/first-status" FM_TELEGRAM_TRANSPORT_BACKOFF=1
   FM_HOME="$home" PATH="$fakebin:$PATH" "$ADAPTER" arm >/dev/null || fail 'arming failed'
   out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 180 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
-  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TEST_FIRST FM_TELEGRAM_TEST_STATUS
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TEST_FIRST FM_TELEGRAM_TEST_STATUS FM_TELEGRAM_TRANSPORT_BACKOFF
   printf '%s\n' "$out"
 }
 
