@@ -746,7 +746,7 @@ telegram_push() {  # <state> <digest>
   local state=$1 msg=$2 out rc=0
   afk_active "$state" || return 0
   [ -x "$FM_DAEMON_DIR/fm-telegram.sh" ] || return 0
-  out=$(printf '%s' "$msg" | FM_TELEGRAM_TIMEOUT="${FM_TELEGRAM_TIMEOUT:-10}" \
+  out=$(printf '%s' "$msg" | FM_TELEGRAM_TIMEOUT=10 \
     "$FM_DAEMON_DIR/fm-telegram.sh" notify - 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || log "telegram notify skipped (exit $rc): $(_collapse_newlines "$out")"
   return 0

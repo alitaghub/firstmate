@@ -125,7 +125,12 @@ It does not un-queue a message that already arrived, so after losing a phone, re
 
 `bin/fm-telegram.sh notify` is a doorbell for the status page, not a second copy of it.
 
-Its one automatic caller is `escalate_flush` in `bin/fm-supervise-daemon.sh`, which pushes the same away-mode escalation digest it has just injected into the supervisor pane - never a second summary that could drift from it. It fires only while away mode is active, only after the escalation has landed, and a failed or unconfigured channel is logged and swallowed, so the terminal escalation is never blocked or delayed by Telegram.
+Two things call it automatically, and nothing else does:
+
+- `escalate_flush` in `bin/fm-supervise-daemon.sh` pushes the same away-mode escalation digest it has just injected into the supervisor pane - never a second summary that could drift from it. It fires only while away mode is active, only after the escalation has landed, and a failed or unconfigured channel is logged and swallowed, so the terminal escalation is never blocked or delayed by Telegram.
+- `tell_the_captain_it_was_refused` in `bin/fm-procevent-telegram.sh` sends one sentence when an inbound message is refused, and only to a sender already on the allowlist - see [When a message is refused](#when-a-message-is-refused) below.
+
+So disabling the daemon push does not silence the bot; a refused forward still produces a reply.
 
 One digest is held back from the phone and the phone only: the hourly pause re-surface (`paused <age>s (awaiting external, ...)`), which restates a wait nobody has changed. It still reaches the supervisor pane exactly as before. The `captain-held` line the same re-surface arm produces is a decision that needs him, so it does buzz.
 

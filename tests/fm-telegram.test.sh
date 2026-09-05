@@ -559,8 +559,11 @@ recording_curl() {
 #!/usr/bin/env bash
 cat > /dev/null
 printf 'call\n' >> "$FM_TELEGRAM_TEST_OUTBOUND"
+prev=
 for _a in "$@"; do
   case "$_a" in text=*) printf '%s\n' "${_a#text=}" >> "$FM_TELEGRAM_TEST_OUTBOUND" ;; esac
+  [ "$prev" = --max-time ] && printf 'max-time=%s\n' "$_a" >> "$FM_TELEGRAM_TEST_OUTBOUND"
+  prev=$_a
 done
 printf '{"ok":true,"result":{"message_id":1}}\n200'
 SH
@@ -589,6 +592,12 @@ test_a_refused_forward_from_the_captain_is_answered() {
     'the captain was never told his forward was refused'
   assert_grep 'Retype it' "$FM_TELEGRAM_TEST_OUTBOUND" \
     'the reply does not say what to do instead'
+  # The reply is sent serially inside the ingest loop, under the channel lock,
+  # so it must carry the short bound rather than the long poll's 70 seconds -
+  # otherwise a batch of refused forwards holds up the captain's next real
+  # message for as long as they take to time out.
+  assert_grep 'max-time=10' "$FM_TELEGRAM_TEST_OUTBOUND" \
+    'the refusal reply was not bounded to its short timeout'
   unset FM_TELEGRAM_TEST_OUTBOUND
   pass 'a forward from the captain is refused and he is told why'
 }

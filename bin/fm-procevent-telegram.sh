@@ -91,6 +91,12 @@ POLL_LIMIT=50
 # unchanged and the channel re-arms itself.
 MAX_TRANSPORT_FAILURES=5
 TRANSPORT_BACKOFF=5
+# Seconds a refusal reply may spend on its one sendMessage. Stated outright, not
+# as a fallback: sourcing bin/fm-telegram-lib.sh has already set
+# FM_TELEGRAM_TIMEOUT to the long poll's 70, so a `:-` default would never
+# apply. The reply runs serially inside the ingest loop under the channel lock,
+# so a slow one delays the captain's next real message from becoming a note.
+REPLY_TIMEOUT=10
 
 usage() {
   awk '
@@ -311,7 +317,7 @@ tell_the_captain_it_was_refused() { # <update> <reason>
     if (.message.from.id | type) == "number" then (.message.from.id | tostring) else "" end' 2>/dev/null) || return 0
   fm_telegram_id_allowed "$from_id" || return 0
   refusal_sentence "$reason" | FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    FM_TELEGRAM_TIMEOUT="${FM_TELEGRAM_TIMEOUT:-10}" \
+    FM_TELEGRAM_TIMEOUT="$REPLY_TIMEOUT" \
     "$SCRIPT_DIR/fm-telegram.sh" notify - >/dev/null 2>&1 || true
 }
 
