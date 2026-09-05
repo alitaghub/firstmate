@@ -365,6 +365,131 @@ test_a_message_travels_from_the_poll_to_one_wake() {
   pass 'one phone message becomes one note and one wake, and the channel re-arms'
 }
 
+# --- who is worth capturing at all ------------------------------------------
+
+# scripted_telegram <home> <body...> installs a curl that answers the calls in
+# order with the given bodies, records the offset every call asked for, and then
+# holds each later call briefly and answers with an empty update list.
+scripted_telegram() {
+  local home=$1 fakebin i=0 body
+  shift
+  fakebin=$(fm_fakebin "$home")
+  for body in "$@"; do
+    i=$((i + 1))
+    printf '%s' "$body" > "$home/response.$i"
+  done
+  : > "$home/offsets.log"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FM_TELEGRAM_TEST_CALLS"
+for _a in "$@"; do
+  case "$_a" in offset=*) printf '%s\n' "${_a#offset=}" >> "$FM_TELEGRAM_TEST_OFFSETS" ;; esac
+done
+if [ -f "$FM_TELEGRAM_TEST_DIR/response.$n" ]; then
+  cat "$FM_TELEGRAM_TEST_DIR/response.$n"
+else
+  sleep 1
+  printf '{"ok":true,"result":[]}\n'
+fi
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' "$fakebin"
+}
+
+# A window carrying nothing but messages from someone nobody allowlisted.
+stranger_window() {
+  jq -cn --argjson sid "$STRANGER_ID" '
+    { ok: true, result: [
+      { update_id: 700, message: { message_id: 1, date: 1757000000,
+          from: { id: $sid, is_bot: false, first_name: "Nobody" },
+          chat: { id: $sid, type: "private" }, text: "hello?" } },
+      { update_id: 701, message: { message_id: 2, date: 1757000001,
+          from: { id: $sid, is_bot: false, first_name: "Nobody" },
+          chat: { id: $sid, type: "private" }, text: "anyone there" } } ] }'
+}
+
+captain_window() {
+  jq -cn --argjson uid "$CAPTAIN_ID" '
+    { ok: true, result: [
+      { update_id: 900, message: { message_id: 3, date: 1757000002,
+          from: { id: $uid, is_bot: false, first_name: "Cap" },
+          chat: { id: $uid, type: "private" }, text: "ship it when CI is green" } } ] }'
+}
+
+test_a_stranger_is_dropped_before_the_capture() {
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(scripted_telegram "$home" "$(stranger_window)" "$(captain_window)")
+  export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TEST_OFFSETS="$home/offsets.log" \
+    FM_TELEGRAM_TEST_DIR="$home"
+
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 60 "$ADAPTER" poll --offset 0 2>&1) \
+    || fail "the poll failed: $out"
+
+  assert_contains "$out" 'count: 1' 'a window of strangers was carried into the capture'
+  assert_contains "$out" 'ship it when CI is green' "the captain's message did not survive the poll"
+  assert_not_contains "$out" 'anyone there' "a stranger's words reached the capture"
+  # The read position has to move past a dropped window inside the same poll.
+  # Without that, the next getUpdates asks for the very same window and the poll
+  # spins against Telegram on one stranger's message forever.
+  grep -qx 702 "$FM_TELEGRAM_TEST_OFFSETS" \
+    || fail "the poll asked Telegram again for the window it had already dropped: $(tr '\n' ' ' < "$FM_TELEGRAM_TEST_OFFSETS")"
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TEST_OFFSETS FM_TELEGRAM_TEST_DIR
+  pass 'messages from a stranger are dropped before they can be captured'
+}
+
+test_a_stranger_costs_no_file_on_the_captains_disk() {
+  # The resource half of the same fact. Every capture the runner writes stays on
+  # disk, so if a message from whoever found the bot's public link produced one,
+  # anyone could grow that directory from a phone, for free, forever.
+  local home fakebin out results
+  home=$(new_home)
+  fakebin=$(scripted_telegram "$home" "$(stranger_window)" "$(captain_window)")
+  export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TEST_OFFSETS="$home/offsets.log" \
+    FM_TELEGRAM_TEST_DIR="$home"
+
+  FM_HOME="$home" PATH="$fakebin:$PATH" "$ADAPTER" arm >/dev/null || fail 'arming failed'
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 60 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) \
+    || fail "the runner failed to complete one Telegram capture"$'\n'"$out"
+
+  results=$(find "$home/state/procevent-inbox" -maxdepth 1 -name '*.result' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$results" = 1 ] || fail "two strangers and one captain message produced $results capture(s), expected one"
+  # And the one capture is his, not theirs: the run that keeps the strangers
+  # would stop on them and never reach his message at all.
+  [ "$(note_count "$home")" = 1 ] || fail "expected the captain's one note, found $(note_count "$home")"
+  assert_contains "$(note_bodies "$home")" 'ship it when CI is green' \
+    "the captured window was the strangers' rather than the captain's"
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TEST_OFFSETS FM_TELEGRAM_TEST_DIR
+  pass 'a window of strangers leaves nothing under the capture inbox'
+}
+
+test_a_shape_refused_message_from_the_captain_is_still_captured() {
+  # Only an unknown SENDER is dropped early. A forward is his own traffic,
+  # refused for its shape, and he is owed the reply that says why - so it has to
+  # reach the capture where ingest can answer it.
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(scripted_telegram "$home" "$(jq -cn --argjson uid "$CAPTAIN_ID" '
+    { ok: true, result: [ { update_id: 800, message: { message_id: 4, date: 1757000000,
+        from: { id: $uid, is_bot: false, first_name: "Cap" },
+        chat: { id: $uid, type: "private" },
+        forward_origin: { type: "user", date: 1756000000 },
+        text: "a colleague wrote this" } } ] }')")
+  export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TEST_OFFSETS="$home/offsets.log" \
+    FM_TELEGRAM_TEST_DIR="$home"
+
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 60 "$ADAPTER" poll --offset 0 2>&1) \
+    || fail "the poll failed: $out"
+
+  assert_contains "$out" 'count: 1' "the captain's refused forward was dropped before he could be told"
+  assert_contains "$out" 'a colleague wrote this' 'the refused forward never reached the capture'
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TEST_OFFSETS FM_TELEGRAM_TEST_DIR
+  pass "a message refused for its shape still reaches the capture when the captain sent it"
+}
+
 test_a_broken_channel_stops_and_asks() {
   # A refused token or a second reader on the same bot will not fix itself, so
   # re-polling it just burns the same failure. It must stop and be visible.
@@ -806,6 +931,9 @@ test_rejects_a_malformed_allowlist
 test_one_bad_update_does_not_block_a_good_one
 test_a_replayed_capture_is_silent
 test_a_message_travels_from_the_poll_to_one_wake
+test_a_stranger_is_dropped_before_the_capture
+test_a_stranger_costs_no_file_on_the_captains_disk
+test_a_shape_refused_message_from_the_captain_is_still_captured
 test_a_broken_channel_stops_and_asks
 test_an_unreachable_network_keeps_the_channel_listening
 test_a_rate_limit_keeps_the_channel_listening

@@ -20,8 +20,9 @@
 #            a state Telegram answers with 409 Conflict.
 # poll       The blocking child the runner executes; never run it directly in a
 #            conversational turn. It holds a long poll open and returns only
-#            when updates arrive or the channel is broken, so a quiet chat costs
-#            no captures at all.
+#            when updates the captain could have sent arrive or the channel is
+#            broken, so a quiet chat - and a chat busy only with strangers -
+#            costs no captures at all.
 # handle     Validate the captured updates, queue each ACCEPTED one as a captain
 #            inbox note, persist the new offset, acknowledge the capture, and
 #            re-arm at that offset. Idempotent: a replayed capture writes no
@@ -52,10 +53,15 @@
 # judgment it applies to words typed at the terminal. Putting that judgment in a
 # poller would move merge and decision authority into a text-matching script.
 #
-# WHO may send is bin/fm-telegram-lib.sh's fm_telegram_update_verdict. A refused
-# update is counted in the ingest summary and its raw form stays in the capture
-# file. The refused sender is told only when he is already on the allowlist -
-# answering anyone else would confirm the bot exists to whoever probed it.
+# WHO may send is bin/fm-telegram-lib.sh's fm_telegram_update_verdict, asked in
+# two places for one reason. The poll asks it first and drops an update that is
+# refused AND comes from a sender nobody allowlisted, so a message from whoever
+# found the bot's public link never becomes a durable capture on the captain's
+# disk. Everything that survives that is either his or refusable for its shape,
+# and ingest asks again: the refusal is counted in its summary, its raw form
+# stays in the capture file, and the sender is told only because he is already
+# on the allowlist - answering anyone else would confirm the bot exists to
+# whoever probed it.
 #
 # Duplicate suppression. Every update that was acted on leaves a receipt under
 # state/telegram.seen/ - one for a queued note, one for a refusal the bot TRIED
@@ -162,6 +168,17 @@ mark_seen() { # <update-id> <what-happened>
   mv -f -- "$tmp" "$path"
 }
 
+# The sender half of the verdict, asked on its own. One allowlist decides who
+# the captain is, so both callers ask it the same way: the poll keeps an update
+# from an unknown sender out of the capture entirely, and ingest answers a
+# refusal only when the sender is him.
+update_sender_allowed() { # <update>
+  local from_id
+  from_id=$(printf '%s' "$1" | jq -r '
+    if (.message.from.id | type) == "number" then (.message.from.id | tostring) else "" end' 2>/dev/null) || return 1
+  fm_telegram_id_allowed "$from_id"
+}
+
 # ---------------------------------------------------------------- poll
 
 emit_result() { # <status> <offset> <count> <detail> [payload-file]
@@ -178,8 +195,31 @@ emit_result() { # <status> <offset> <count> <detail> [payload-file]
   fi
 }
 
+# Keep only what is worth a durable capture. An update the verdict refuses AND
+# whose sender is not on the allowlist is dropped here, before the runner writes
+# anything: the bot's link opens for anybody, so a stranger's message must cost
+# no file at all. A refusal for the message's SHAPE from the captain himself is
+# legitimate traffic and stays, because he is owed the reply that says why.
+keep_worth_capturing() { # <updates-json> -> the surviving updates as a JSON array
+  local updates=$1 total i update verdict kept=
+  total=$(printf '%s' "$updates" | jq -r 'length') || return 1
+  i=0
+  while [ "$i" -lt "$total" ]; do
+    update=$(printf '%s' "$updates" | jq -c ".[$i]") || return 1
+    i=$((i + 1))
+    verdict=$(fm_telegram_update_verdict "$update")
+    if [ "$verdict" != accept ] && ! update_sender_allowed "$update"; then
+      continue
+    fi
+    kept="$kept$update
+"
+  done
+  printf '%s' "$kept" | jq -sc '.'
+}
+
 cmd_poll() {
   local offset='' failures=0 response result count payload rc transient detail
+  local kept kept_count batch_high
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --offset) [ "$#" -ge 2 ] || die "--offset needs a nonnegative integer"; offset=$2; shift 2 ;;
@@ -243,8 +283,23 @@ cmd_poll() {
       # result whose only content is that nothing happened.
       continue
     fi
-    printf '%s' "$result" | jq -c '.' > "$payload" || { emit_result error "$offset" 0 "cannot stage captured updates"; return 0; }
-    emit_result updates "$offset" "$count" "$count update(s) captured" "$payload"
+    kept=$(keep_worth_capturing "$result") || { emit_result error "$offset" 0 "cannot read the captured updates"; return 0; }
+    kept_count=$(printf '%s' "$kept" | jq -r 'length' 2>/dev/null) || kept_count=invalid
+    case "$kept_count" in
+      invalid|''|*[!0-9]*) emit_result error "$offset" 0 "cannot read the captured updates"; return 0 ;;
+    esac
+    if [ "$kept_count" -eq 0 ]; then
+      # Nothing here is ours. Move the read position past the window in memory
+      # and open the next one: without that step the very next getUpdates asks
+      # for the same window again and the poll spins on it. Nothing is written
+      # to disk, so a replay after a crash simply drops the same updates again.
+      batch_high=$(printf '%s' "$result" | jq -r '
+        [.[] | select((.update_id | type) == "number") | .update_id] | max // empty' 2>/dev/null) || batch_high=
+      case "$batch_high" in ''|*[!0-9]*) ;; *) offset=$((batch_high + 1)) ;; esac
+      continue
+    fi
+    printf '%s' "$kept" | jq -c '.' > "$payload" || { emit_result error "$offset" 0 "cannot stage captured updates"; return 0; }
+    emit_result updates "$offset" "$kept_count" "$kept_count update(s) captured" "$payload"
     return 0
   done
 }
@@ -325,10 +380,8 @@ refusal_sentence() { # <reason>
 # arrived on, so a refusal in a group cannot make the bot post into that group.
 # Every failure is swallowed: a reply that cannot be sent must not stop ingest.
 tell_the_captain_it_was_refused() { # <update> <reason> -> 0 when a reply was sent
-  local update=$1 reason=$2 from_id
-  from_id=$(printf '%s' "$update" | jq -r '
-    if (.message.from.id | type) == "number" then (.message.from.id | tostring) else "" end' 2>/dev/null) || return 1
-  fm_telegram_id_allowed "$from_id" || return 1
+  local update=$1 reason=$2
+  update_sender_allowed "$update" || return 1
   refusal_sentence "$reason" | FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_TELEGRAM_TIMEOUT="$REPLY_TIMEOUT" \
     "$SCRIPT_DIR/fm-telegram.sh" notify - >/dev/null 2>&1 || true
