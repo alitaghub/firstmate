@@ -6,6 +6,7 @@
 #   fm-procevent-telegram.sh poll --offset <n>
 #   fm-procevent-telegram.sh handle <sequence> <result-file>
 #   fm-procevent-telegram.sh autohandle <source-id> <sequence> <result-file>
+#   fm-procevent-telegram.sh ingest <result-file>
 #   fm-procevent-telegram.sh classify <result-file>
 #   fm-procevent-telegram.sh terminal <result-file>
 #   fm-procevent-telegram.sh self-announcing
@@ -27,7 +28,10 @@
 #            second note.
 # autohandle The runner's own entry into handle, keyed by canonical source id,
 #            so applying a capture never depends on a handler remembering to.
-# classify   Print the captured outcome class: updates, empty, error, or malformed.
+# ingest     The note-writing half of handle on its own, without re-arming or
+#            acknowledging. Takes the same channel lock as handle, so running it
+#            by hand next to a live runner cannot double-queue a note.
+# classify   Print the captured outcome class: updates, error, or malformed.
 # terminal   Every capture ends its registration; handle re-arms the next one.
 # self-announcing
 #            Declares that a fully applied capture announces itself downstream:
@@ -96,7 +100,12 @@ read_offset() {
   local value
   [ -f "$OFFSET_FILE" ] && [ ! -L "$OFFSET_FILE" ] || { printf '0\n'; return 0; }
   value=$(head -n1 "$OFFSET_FILE" 2>/dev/null | tr -d '[:space:]')
-  case "$value" in ''|*[!0-9]*) die "Telegram offset file is not a number: $OFFSET_FILE" ;; esac
+  case "$value" in
+    ''|*[!0-9]*)
+      printf 'error: Telegram offset file is not a number: %s\n' "$OFFSET_FILE" >&2
+      return 1
+      ;;
+  esac
   printf '%s\n' "$value"
 }
 
@@ -226,7 +235,7 @@ classify_result() {
   status=$(result_header_field "$file" status 2>/dev/null || true)
   [ "$source" = "$SOURCE_ID" ] || { printf 'malformed\n'; return 0; }
   case "$status" in
-    updates|empty|error) printf '%s\n' "$status" ;;
+    updates|error) printf '%s\n' "$status" ;;
     *) printf 'malformed\n' ;;
   esac
 }
@@ -236,7 +245,10 @@ classify_result() {
 cmd_arm() {
   local offset
   fm_telegram_load_config || die "$FM_TELEGRAM_ERROR"
-  offset=$(read_offset)
+  # A bad offset must refuse here. Arming with an empty one registers a poll
+  # that dies on every start, so the runner restarts a source that can never
+  # capture anything while the operator was told the channel is armed.
+  offset=$(read_offset) || return 1
   "$SCRIPT_DIR/fm-procevent.sh" register telegram "$SOURCE_ID" -- \
     "$SCRIPT_DIR/fm-procevent-telegram.sh" poll --offset "$offset" || return 1
   printf 'armed: %s offset=%s\n' "$SOURCE_ID" "$offset"
@@ -263,7 +275,6 @@ cmd_ingest() { # <result-file>
   case "$class" in
     malformed) die "Telegram result is malformed" ;;
     error) printf 'error: %s\n' "$(result_header_field "$file" detail 2>/dev/null || printf 'unknown')"; return 3 ;;
-    empty) printf 'ingested: queued=0 skipped=0 rejected=0\n'; return 0 ;;
   esac
   payload=$(result_payload "$file") || die "Telegram result has no payload boundary"
   count=$(printf '%s' "$payload" | jq -r 'if type == "array" then length else "invalid" end' 2>/dev/null) || count=invalid
@@ -326,14 +337,21 @@ cmd_handle_locked() { # <sequence> <result-file>
   return "$rc"
 }
 
-cmd_handle() {
-  local seq=${1:-} file=${2:-}
+# Every entry that queues notes, writes seen receipts, or moves the offset runs
+# under one channel lock, so two concurrent runs over the same capture cannot
+# both find no receipt and queue the captain's message twice.
+with_ingest_lock() { # <command> [args...]
   (
     mkdir -p "$STATE" || die "cannot create the state directory"
     fm_lock_acquire_wait "$INGEST_LOCK" || die "cannot lock the Telegram channel"
     trap 'fm_lock_release "$INGEST_LOCK"' EXIT
-    cmd_handle_locked "$seq" "$file"
+    "$@"
   )
+}
+
+cmd_handle() {
+  local seq=${1:-} file=${2:-}
+  with_ingest_lock cmd_handle_locked "$seq" "$file"
 }
 
 cmd_autohandle() { # <source-id> <sequence> <result-file>
@@ -351,7 +369,7 @@ case "${1-}" in
   poll)            shift; cmd_poll "$@" ;;
   handle)          shift; [ "$#" -eq 2 ] || usage; cmd_handle "$@" ;;
   autohandle)      shift; [ "$#" -eq 3 ] || usage; cmd_autohandle "$@" ;;
-  ingest)          shift; [ "$#" -eq 1 ] || usage; cmd_ingest "$@" ;;
+  ingest)          shift; [ "$#" -eq 1 ] || usage; with_ingest_lock cmd_ingest "$@" ;;
   classify)        shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal)        shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
   self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;

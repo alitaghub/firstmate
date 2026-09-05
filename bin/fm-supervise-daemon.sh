@@ -702,8 +702,33 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    telegram_push "$state" "$msg"
+    return 0
+  fi
   return 1
+}
+
+# Push the digest that was just injected to the captain's phone. The supervisor
+# pane is pull; away from the machine only a phone buzz is push, which is the
+# gap this closes. It sends the daemon's own digest rather than composing a
+# second summary, so the two can never disagree about what needed him.
+#
+# Strictly after the escalation has landed and the buffer is cleared, and every
+# failure is swallowed: an unconfigured channel, a dead network, or a refused
+# API call must leave the daemon behaving exactly as it did before this existed.
+# The API timeout is bounded well under the daemon's loop so a hanging Telegram
+# cannot stall supervision either.
+telegram_push() {  # <state> <digest>
+  local state=$1 msg=$2 out rc=0
+  afk_active "$state" || return 0
+  [ "${FM_TELEGRAM_NOTIFY:-1}" != 0 ] || return 0
+  [ -x "$FM_DAEMON_DIR/fm-telegram.sh" ] || return 0
+  out=$(printf '%s' "$msg" | FM_TELEGRAM_TIMEOUT="${FM_TELEGRAM_TIMEOUT:-10}" \
+    "$FM_DAEMON_DIR/fm-telegram.sh" notify - 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || log "telegram notify skipped (exit $rc): $(_collapse_newlines "$out")"
+  return 0
 }
 
 # --- backend-independent active wedge alert ---------------------------------

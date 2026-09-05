@@ -130,6 +130,8 @@ It does not un-queue a message that already arrived, so after losing a phone, re
 
 `bin/fm-telegram.sh notify` is a doorbell for the status page, not a second copy of it.
 
+Its one automatic caller is `escalate_flush` in `bin/fm-supervise-daemon.sh`, which pushes the same away-mode escalation digest it has just injected into the supervisor pane - never a second summary that could drift from it. It fires only while away mode is active, only after the escalation has landed, and a failed or unconfigured channel is logged and swallowed, so the terminal escalation is never blocked or delayed by Telegram. Set `FM_TELEGRAM_NOTIFY=0` to stop the push while leaving the inbound channel armed.
+
 Send only what `AGENTS.md` section 9 already says must reach the captain immediately: work ready for review with its link, a finished investigation, a decision that needs him, a real blocker, anything destructive or irreversible, a needed credential.
 Never routine progress, empty polls, elapsed time, or no-change updates.
 A phone buzz is more expensive than a line of terminal text, and a channel that cries wolf gets muted - at which point it is worse than not having one.

@@ -1382,6 +1382,40 @@ test_escalate_batches_into_one_digest() {
   pass "multiple escalations flush as a single batched digest"
 }
 
+# The outbound Telegram push hangs off a successful flush. A broken or
+# unconfigured channel must be invisible to supervision: the digest is already
+# injected and the buffer already cleared before notify runs, so the worst an
+# unreachable Telegram can cost is one log line.
+test_telegram_push_failure_does_not_disturb_escalation() {
+  local dir state fakebin sent capture log
+  dir=$(make_supercase telegram-push-fail)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  log="$dir/daemon.log"; : > "$log"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer
+  printf 'FM_TELEGRAM_TOKEN=1234:abcDEF-token\n' > "$dir/env"
+  printf '4242\n' > "$dir/allow"
+  escalate_add "$state" "done: PR 1"
+  afk_enter "$state"
+  # A configured channel whose API is unreachable: 127.0.0.1:1 refuses the
+  # connection at once, so the real notify path runs with no network and no bot.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 LOG="$log" \
+    FM_TELEGRAM_ENV_FILE="$dir/env" FM_TELEGRAM_ALLOW_FILE="$dir/allow" \
+    FM_TELEGRAM_API_BASE="http://127.0.0.1:1" FM_TELEGRAM_TIMEOUT=2 \
+    escalate_flush "$state" \
+    || fail "escalate_flush failed after the Telegram push failed"
+  grep -F 'done: PR 1' "$sent" >/dev/null || fail "the terminal escalation did not land"
+  [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after a failed push"
+  grep -F 'telegram notify skipped' "$log" >/dev/null \
+    || fail "the failed Telegram push was never attempted or never logged"
+  if grep -F '1234:abcDEF-token' "$log" >/dev/null; then
+    fail "the bot token leaked into the daemon log"
+  fi
+  pass "a failing Telegram push leaves the escalation delivered and the buffer cleared"
+}
+
 test_escalate_batch_age_uses_first_append() {
   local dir state fakebin sent capture
   dir=$(make_supercase batch-age)
@@ -2651,6 +2685,7 @@ test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
+test_telegram_push_failure_does_not_disturb_escalation
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
