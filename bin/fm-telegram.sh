@@ -3,7 +3,6 @@
 #
 # Usage:
 #   fm-telegram.sh notify <text>...   | fm-telegram.sh notify -
-#   fm-telegram.sh whoami
 #   fm-telegram.sh status
 #
 # notify  Push one message to the captain's phone. This is the half a status web
@@ -17,11 +16,6 @@
 #         another chat, so a mistyped recipient cannot exist.
 #         A bot cannot start a conversation, so the captain must have messaged
 #         it at least once before this works.
-# whoami  Print the numeric chat id and user id of whoever last messaged the
-#         bot, so setup needs no third-party bot. It reads without an offset, so
-#         it confirms nothing to Telegram and consumes no message.
-#         Telegram allows exactly one active reader per token, so run this while
-#         the channel is NOT armed; otherwise it reports a conflict.
 # status  Say whether the channel is configured, and how many ids are
 #         allowlisted. Prints no token and makes no network call.
 #
@@ -81,25 +75,6 @@ cmd_notify() {
   printf 'sent to %s\n' "$chat"
 }
 
-cmd_whoami() {
-  local response result count
-  require_config
-  response=$(fm_telegram_api getUpdates --data-urlencode 'limit=100') || exit 1
-  result=$(fm_telegram_api_result "$response") || exit 1
-  count=$(printf '%s' "$result" | jq -r 'length' 2>/dev/null) || count=0
-  if [ "${count:-0}" -eq 0 ]; then
-    printf 'no messages are waiting. Send your bot any message from Telegram, then run this again.\n'
-    printf 'If the channel is already armed its poller has consumed them; check state/telegram.offset instead.\n'
-    return 0
-  fi
-  printf '%s' "$result" | jq -r '
-    [ .[] | select(has("message")) ] | last |
-    if . == null then "no plain message found in the pending updates"
-    else "user_id: \(.message.from.id // "?")   chat_id: \(.message.chat.id // "?")   from: \(.message.from.first_name // "?")"
-    end'
-  printf 'Put the numbers you recognise in %s, one per line.\n' "$(fm_telegram_allow_file)"
-}
-
 cmd_status() {
   local count
   if ! fm_telegram_load_config; then
@@ -113,7 +88,6 @@ cmd_status() {
 
 case "${1-}" in
   notify) shift; cmd_notify "$@" ;;
-  whoami) shift; [ "$#" -eq 0 ] || usage; cmd_whoami ;;
   status) shift; [ "$#" -eq 0 ] || usage; cmd_status ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;

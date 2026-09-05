@@ -84,15 +84,10 @@ Five minutes, and the captain does the token step himself so it never appears in
 3. **Message the bot once** from Telegram - `hello` is enough.
    This is also required for outbound to work at all: Telegram blocks a bot from starting a conversation, so the bot cannot message the captain until the captain has messaged it.
 
-4. **Find the numbers**, using nothing but the captain's own bot:
-
-   ```bash
-   bin/fm-telegram.sh whoami
-   ```
-
-   It prints the user id and the chat id of whoever last messaged the bot.
-   In a private chat they are the same number, which is expected.
-   Run it while the channel is not armed: Telegram allows exactly one active reader per token.
+4. **Find the numeric id.**
+   In Telegram, open Settings and tap the account row; on most clients the numeric user id is shown there, and it is also what any account-info view reports.
+   In a one-to-one private chat the user id and the chat id are the same number, which is what the allowlist needs.
+   Read it from the captain's own account rather than from whatever last messaged the bot: the bot is public, so a stranger can have probed it in between, and one wrong number pasted here is the whole safety argument gone.
 
 5. **Write the allowlist**, one numeric id per line, with an optional trailing comment:
 
@@ -158,6 +153,10 @@ The read position moves only after a note is safely on disk.
 The other order would confirm the message to Telegram, which then drops it, and a crash at that moment would lose the captain's instruction outright.
 So the channel chooses a possible duplicate over a possible loss, and then removes the duplicate: every queued message leaves a receipt, and a replay skips anything that already has one.
 
+**Two failure classes, two different answers.**
+If the request never gets an answer at all - no wifi, no DNS, a VPN restart, a laptop waking up - the channel treats it as *unreachable*: it re-arms itself and keeps polling, silently, because that class fixes itself and a brief outage must not take the channel down while the captain is away.
+If Telegram answers and *refuses* - a rejected token, a second reader on the same bot, a `409 Conflict` - the channel stops and raises a wake instead, because re-polling a refusal just burns the same failure in a loop until somebody changes something.
+
 **The one hard limit: Telegram keeps an unconfirmed message for 24 hours.**
 If the machine is off for longer than that, messages older than a day are gone from Telegram's side and cannot be recovered.
 
@@ -178,7 +177,7 @@ Firstmate still escalates anything destructive, irreversible, or security-sensit
 
 - `bin/fm-telegram-lib.sh` - credential handling, transport, and the accept/reject check. The security boundary.
 - `bin/fm-procevent-telegram.sh` - the long poll, and turning accepted updates into notes.
-- `bin/fm-telegram.sh` - `notify`, `whoami`, `status`.
+- `bin/fm-telegram.sh` - `notify` and `status`.
 - `tests/fm-telegram.test.sh` - the accept case and every rejection above, against fixture updates.
 
 Each script's header and `--help` own its exact flags and mechanics.

@@ -31,7 +31,9 @@
 # ingest     The note-writing half of handle on its own, without re-arming or
 #            acknowledging. Takes the same channel lock as handle, so running it
 #            by hand next to a live runner cannot double-queue a note.
-# classify   Print the captured outcome class: updates, error, or malformed.
+# classify   Print the captured outcome class: updates, unreachable, error, or
+#            malformed. `unreachable` is a transport failure that fixes itself
+#            and re-arms; `error` is a refusal from Telegram that stops and asks.
 # terminal   Every capture ends its registration; handle re-arms the next one.
 # self-announcing
 #            Declares that a fully applied capture announces itself downstream:
@@ -77,14 +79,15 @@ INGEST_LOCK="$STATE/.telegram-ingest.lock"
 
 # Server-side long-poll window. Telegram returns the moment a message arrives,
 # so this bounds an idle window, not the latency of a real message.
-POLL_WINDOW=${FM_TELEGRAM_POLL_WINDOW:-50}
+POLL_WINDOW=50
 # Updates per capture. Well under the runner's output bound even at Telegram's
 # 4096-character message limit; anything left over arrives on the next poll.
-POLL_LIMIT=${FM_TELEGRAM_POLL_LIMIT:-50}
+POLL_LIMIT=50
 # Consecutive transport failures tolerated before the poll gives up and reports
-# a broken channel. A network drop costs nothing because the offset is unchanged.
-MAX_TRANSPORT_FAILURES=${FM_TELEGRAM_MAX_TRANSPORT_FAILURES:-5}
-TRANSPORT_BACKOFF=${FM_TELEGRAM_TRANSPORT_BACKOFF:-5}
+# an unreachable channel. A network drop costs nothing because the offset is
+# unchanged and the channel re-arms itself.
+MAX_TRANSPORT_FAILURES=5
+TRANSPORT_BACKOFF=5
 
 usage() {
   awk '
@@ -185,7 +188,10 @@ cmd_poll() {
     if [ "$rc" -ne 0 ]; then
       failures=$((failures + 1))
       if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-        emit_result error "$offset" 0 "$(fm_telegram_redact "$response" | tr '\n' ' ')"
+        # curl never got an answer at all: no DNS, no route, no reply. That is
+        # the one failure class that fixes itself, so it is NOT an `error` and
+        # must not disarm the channel over a wifi blip.
+        emit_result unreachable "$offset" 0 "$(fm_telegram_redact "$response" | tr '\n' ' ')"
         return 0
       fi
       sleep "$TRANSPORT_BACKOFF"
@@ -235,7 +241,7 @@ classify_result() {
   status=$(result_header_field "$file" status 2>/dev/null || true)
   [ "$source" = "$SOURCE_ID" ] || { printf 'malformed\n'; return 0; }
   case "$status" in
-    updates|error) printf '%s\n' "$status" ;;
+    updates|unreachable|error) printf '%s\n' "$status" ;;
     *) printf 'malformed\n' ;;
   esac
 }
@@ -274,6 +280,7 @@ cmd_ingest() { # <result-file>
   class=$(classify_result "$file")
   case "$class" in
     malformed) die "Telegram result is malformed" ;;
+    unreachable) printf 'unreachable: %s\n' "$(result_header_field "$file" detail 2>/dev/null || printf 'unknown')"; return 0 ;;
     error) printf 'error: %s\n' "$(result_header_field "$file" detail 2>/dev/null || printf 'unknown')"; return 3 ;;
   esac
   payload=$(result_payload "$file") || die "Telegram result has no payload boundary"
@@ -328,9 +335,10 @@ cmd_handle_locked() { # <sequence> <result-file>
   cmd_ingest "$file" || rc=$?
   [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || return "$rc"
   if [ "$rc" -eq 0 ]; then
-    # A broken channel is NOT re-armed: re-polling a refused token or a
-    # conflicting second poller just burns the same failure in a loop. The
-    # capture stays unacknowledged so firstmate is woken to decide.
+    # A channel Telegram REFUSED is not re-armed: re-polling a rejected token or
+    # a conflicting second poller just burns the same failure in a loop, so the
+    # capture stays unacknowledged and firstmate is woken to decide. A channel
+    # that was merely unreachable takes this path instead and keeps listening.
     cmd_arm >/dev/null || return 1
     "$SCRIPT_DIR/fm-procevent.sh" handled "$SOURCE_ID" "$seq" >/dev/null || return 1
   fi

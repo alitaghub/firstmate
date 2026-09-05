@@ -143,8 +143,6 @@ fm_telegram_load_config() {
   return 0
 }
 
-fm_telegram_configured() { fm_telegram_load_config >/dev/null 2>&1; }
-
 # Replace the loaded token wherever it appears in <text>. Every string this
 # channel prints passes through here, on the assumption that anything printed
 # ends up in a transcript or a log.
@@ -241,9 +239,4 @@ fm_telegram_update_verdict() {
   [ -n "${text//[[:space:]]/}" ] || { printf 'reject:no-text\n'; return 0; }
 
   printf 'accept\n'
-}
-
-# True when the verdict on <update> is accept.
-fm_telegram_update_accepted() {
-  [ "$(fm_telegram_update_verdict "$1")" = accept ]
 }

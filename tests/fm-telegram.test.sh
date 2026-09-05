@@ -353,6 +353,50 @@ test_a_broken_channel_stops_and_asks() {
   pass 'a channel Telegram refuses stops and raises a wake instead of retrying forever'
 }
 
+# fake_telegram_unreachable <home> installs a curl that never reaches anything -
+# the shape of a wifi drop or a VPN restart - and then recovers into an idle
+# chat, so the re-armed poll has something harmless to block on.
+fake_telegram_unreachable() {
+  local home=$1 fakebin
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+if [ "$n" -lt 5 ]; then
+  printf 'curl: (6) Could not resolve host: api.telegram.org\n' >&2
+  exit 6
+fi
+sleep 1
+printf '{"ok":true,"result":[]}\n'
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' "$fakebin"
+}
+
+test_an_unreachable_network_keeps_the_channel_listening() {
+  # A wifi blip is the one failure that fixes itself. Disarming on it would take
+  # the channel down until an agent turn puts it back - during away mode, the
+  # exact window this feature exists for.
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(fake_telegram_unreachable "$home")
+  export FM_TELEGRAM_TEST_CALLS="$home/calls"
+
+  FM_HOME="$home" PATH="$fakebin:$PATH" "$ADAPTER" arm >/dev/null || fail 'arming failed'
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 120 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
+
+  assert_contains "$out" 'autohandled: telegram' \
+    'an unreachable network was left for a handler instead of being absorbed'
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" telegram \
+    'the channel did not re-arm after a transport failure, so the next message would never arrive'
+  [ -s "$home/state/.wake-queue" ] && fail 'a transport blip woke firstmate'
+  [ "$(note_count "$home")" = 0 ] || fail 'an unreachable poll queued a note'
+  unset FM_TELEGRAM_TEST_CALLS
+  pass 'an unreachable network re-arms and keeps listening instead of stopping'
+}
+
 # --- the token --------------------------------------------------------------
 
 test_the_token_is_never_printed() {
@@ -404,8 +448,8 @@ test_the_token_never_reaches_a_command_line() {
   fakebin=$(curl_recorder "$home")
   export FM_TELEGRAM_TEST_ARGV="$home/curl.argv" FM_TELEGRAM_TEST_STDIN="$home/curl.stdin"
 
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" whoami 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail 'whoami reported success while curl was failing'
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" notify 'ready for review' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'notify reported success while curl was failing'
   assert_present "$FM_TELEGRAM_TEST_ARGV" 'curl was never invoked, so this proves nothing'
   assert_no_grep "$FAKE_TOKEN" "$FM_TELEGRAM_TEST_ARGV" \
     'the bot token was passed to curl as a command-line argument'
@@ -439,5 +483,6 @@ test_one_bad_update_does_not_block_a_good_one
 test_a_replayed_capture_is_silent
 test_a_message_travels_from_the_poll_to_one_wake
 test_a_broken_channel_stops_and_asks
+test_an_unreachable_network_keeps_the_channel_listening
 test_the_token_is_never_printed
 test_the_token_never_reaches_a_command_line
