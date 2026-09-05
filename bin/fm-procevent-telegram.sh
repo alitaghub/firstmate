@@ -295,7 +295,8 @@ cmd_arm() {
 # ---------------------------------------------------------------- handle
 
 # Queue one accepted update as a captain inbox note. The note body is the
-# captain's own text and nothing else; provenance rides the note's source field.
+# captain's own text and nothing else, queued through the ordinary note surface,
+# so it reads exactly like one he typed at the terminal - which is what it is.
 queue_note() { # <text> -> prints the note id
   local text=$1 output
   output=$(printf '%s' "$text" | FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
