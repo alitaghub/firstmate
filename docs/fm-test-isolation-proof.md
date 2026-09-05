@@ -187,9 +187,21 @@ Both proof runs above were taken while the machine carried a five-minute load av
 
 ### standalone: admitted
 
-- Date: 2026-09-03
+- Date: 2026-09-05
 - Command: `bin/fm-test-isolation-proof.sh --pool standalone --jobs 4`
-- Result: two consecutive runs, 28 candidates, 0 failures.
+- Result: two consecutive runs, 29 candidates, 0 failures.
+
+| Run | Summary |
+|---|---|
+| 1 | `FM_ISOLATION_SUMMARY total=29 failed=0 concurrency=4 duration_ms=162618` |
+| 2 | `FM_ISOLATION_SUMMARY total=29 failed=0 concurrency=4 duration_ms=175098` |
+
+This re-proof covers `tests/fm-telegram.test.sh`, which joined the family after the first admission; every member gets its concurrency from a proof that included it.
+It needs a `umask` that leaves a home's `state/` private, so both runs above used `umask 077`.
+Under `umask 002` five members that predate this re-proof fail on `process-event state root is not a private directory` serially as well as concurrently: `fm-procevent`, `fm-procevent-when`, `fm-procevent-quota`, `fm-extension-binding`, and `fm-remote-secondmate-parent-binding`.
+That is a host prerequisite rather than a concurrency result, the same shape as the pinned Pi package below.
+
+The first admission, on 2026-09-03, covered the 28 members the family had then.
 
 | Run | Summary |
 |---|---|
