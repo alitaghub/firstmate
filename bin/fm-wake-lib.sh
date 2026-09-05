@@ -22,8 +22,10 @@ _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 # to have: a home first created under umask 002 gets a group-writable state root
 # and every process-event command refuses it from then on, with no way back
 # except a manual chmod. Code that needs a directory to be private has to create
-# it private, so this library owns creating the state root and every other
-# creator calls fm_private_dir_ensure rather than mkdir.
+# it private, so this library creates the state root through
+# fm_private_dir_ensure at source time, and tightens one an earlier run under a
+# permissive umask left group-writable. Creators outside this library still use
+# a plain mkdir, so that source-time call is what restores the guarantee.
 #
 # Tightening only ever removes group and other write. A healthy 755 state root
 # from an ordinary umask 022 home is left exactly as it is; only a mode the
