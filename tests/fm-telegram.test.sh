@@ -682,20 +682,33 @@ SH
 
 test_a_window_that_can_never_advance_gives_up_visibly() {
   # THE DEFECT IS THE REPETITION, not the single bad response. This window can
-  # never be advanced past, so before this was bounded the poll waited and
-  # retried it for as long as the process lived: an armed channel that reads
-  # nothing and tells nobody. Every other repeating failure here ends in a
-  # visible `unreachable`; this one must too.
+  # never be advanced past, so bounding one poll is not enough: if the give-up
+  # re-arms, the loop simply moves from inside one process to across processes,
+  # and the captain still has an armed channel that reads nothing and tells
+  # nobody. So this asserts the ACROSS-PROCESS behaviour - it stops, it stays
+  # stopped through a reconcile, and firstmate is left something it can see.
   local home out calls
   home=$(new_home)
   out=$(run_one_capture "$home" "$(fake_telegram_unadvanceable "$home")")
 
-  # It gave up, rather than looping until the runner's timeout killed it.
-  assert_contains "$out" 'autohandled: telegram' \
-    'the unadvanceable window never produced a result, so the poll never gave up'
-  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" telegram \
-    'the channel did not re-arm after giving up on an unadvanceable window'
+  # It gave up, rather than looping until the runner's timeout killed it, and it
+  # gave up into the stop-and-ask path rather than the silent re-arming one.
+  assert_contains "$out" 'not-autohandled' \
+    'an unadvanceable window was quietly marked handled, so the channel re-armed into the same loop'
+  assert_grep 'procevent telegram' "$home/state/.wake-queue" \
+    'an unadvanceable window raised no wake, so the channel would fail silently'
   [ "$(note_count "$home")" = 0 ] || fail 'an unadvanceable window queued a note'
+
+  # And it STAYS stopped. A reconcile is the watcher's own restart path, so a
+  # source still registered here would be polled again within seconds - which is
+  # exactly the across-process loop this test exists to catch.
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'the channel re-armed after an unadvanceable window instead of stopping to ask' ;;
+  esac
+  FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'a reconcile restarted the channel on a window it can never advance past' ;;
+  esac
 
   # And it gave up ON THE BUDGET: it retried more than once, and it stopped at
   # the same limit every other repeating failure stops at. Asserting only "it
@@ -704,7 +717,7 @@ test_a_window_that_can_never_advance_gives_up_visibly() {
   calls=$(cat "$home/calls" 2>/dev/null || echo 0)
   [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) instead of waiting and retrying"
   [ "$calls" -le 8 ] || fail "the poll made $calls attempts on a window it can never advance past - the budget is not bounding it"
-  pass 'a window the poll can never advance past ends in a bounded, visible give-up'
+  pass 'a window the poll can never advance past stops for good and raises a wake'
 }
 
 test_an_idle_channel_never_reports_itself_unreachable() {

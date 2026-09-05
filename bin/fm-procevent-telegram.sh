@@ -35,7 +35,9 @@
 # classify   Print the captured outcome class: updates, unreachable, error, or
 #            malformed. `unreachable` is a failure that fixes itself - no route,
 #            a 429, a 5xx, or a body that is not Bot API JSON - and re-arms;
-#            `error` is Telegram refusing the call (401, 409) and stops to ask.
+#            `error` is a channel nothing here can repair - Telegram refusing
+#            the call (401, 409), a removed token or allowlist, or a window the
+#            poll can never advance past - and stops to ask.
 # terminal   Every capture ends its registration; handle re-arms the next one.
 # self-announcing
 #            Declares that a fully applied capture announces itself downstream:
@@ -305,15 +307,16 @@ cmd_poll() {
         ''|*[!0-9]*)
           # No id to advance past, so the next window is the same window.
           # Inventing an offset here would confirm updates nobody read, so this
-          # waits instead - but it waits on the SAME counter and backoff as
-          # every other repeating failure, so a window this poll can never get
-          # past ends in a visible `unreachable` rather than looping until the
-          # process dies. Every other repeating failure in this loop is bounded;
-          # this one must be too, or the captain sees an armed channel that
-          # reads nothing and is told nothing.
+          # waits instead, on the SAME counter and backoff as every other
+          # repeating failure. What it gives up INTO is `error`, not
+          # `unreachable`: a window that keeps coming back unusable does not fix
+          # itself, and `unreachable` re-arms and acknowledges silently, which
+          # would only move the loop from inside this process to across
+          # processes. `error` stops without re-arming and reaches firstmate,
+          # the same path a refused token or a second reader takes.
           failures=$((failures + 1))
           if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-            emit_result unreachable "$offset" 0 "telegram returned a window this poll cannot advance past"
+            emit_result error "$offset" 0 "telegram returned a window this poll cannot advance past"
             return 0
           fi
           sleep "$TRANSPORT_BACKOFF"
