@@ -1437,7 +1437,8 @@ SH
 
 # flush_with_telegram <dir> <state> <sent> <buzzed> [log]
 flush_with_telegram() {
-  local dir=$1 state=$2 sent=$3 buzzed=$4 log=${5:-$dir/daemon.log}
+  local dir=$1 state=$2 sent=$3 buzzed=$4
+  local log=${5:-$dir/daemon.log}
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_ESCALATE_BATCH_SECS=0 LOG="$log" \
     FM_TELEGRAM_ENV_FILE="$dir/env" FM_TELEGRAM_ALLOW_FILE="$dir/allow" \
