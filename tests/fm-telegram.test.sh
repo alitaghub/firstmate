@@ -466,6 +466,35 @@ test_a_stranger_costs_no_file_on_the_captains_disk() {
   pass 'a window of strangers leaves nothing under the capture inbox'
 }
 
+test_a_window_the_poll_cannot_advance_past_waits_rather_than_hammers() {
+  # A window with no numeric update_id gives the poll nothing to advance past,
+  # so the next getUpdates asks for the very same window. Inventing an offset
+  # would confirm updates nobody read, so it waits instead - and the wait is
+  # what keeps an intermediary answering nonsense from becoming a request storm
+  # against the rate limit the rest of this poll works to outlast.
+  local home fakebin calls
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+printf '{"ok":true,"result":[{"message":{"text":"no id here"}}]}\n'
+SH
+  chmod +x "$fakebin/curl"
+  export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TRANSPORT_BACKOFF=3
+
+  FM_HOME="$home" PATH="$fakebin:$PATH" timeout 7 "$ADAPTER" poll --offset 0 >/dev/null 2>&1 || true
+
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -le 3 ] \
+    || fail "the poll made $calls calls in 7s on a window it cannot advance past, so it is spinning rather than waiting"
+  [ "$calls" -ge 1 ] || fail 'the poll never called Telegram at all, so this proves nothing'
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TRANSPORT_BACKOFF
+  pass 'a window the poll cannot advance past is waited on, not hammered'
+}
+
 test_a_shape_refused_message_from_the_captain_is_still_captured() {
   # Only an unknown SENDER is dropped early. A forward is his own traffic,
   # refused for its shape, and he is owed the reply that says why - so it has to
@@ -933,6 +962,7 @@ test_a_replayed_capture_is_silent
 test_a_message_travels_from_the_poll_to_one_wake
 test_a_stranger_is_dropped_before_the_capture
 test_a_stranger_costs_no_file_on_the_captains_disk
+test_a_window_the_poll_cannot_advance_past_waits_rather_than_hammers
 test_a_shape_refused_message_from_the_captain_is_still_captured
 test_a_broken_channel_stops_and_asks
 test_an_unreachable_network_keeps_the_channel_listening

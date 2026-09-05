@@ -52,7 +52,11 @@ A message is accepted only when every one of these holds:
 - the sender is not a bot account;
 - it has non-empty text.
 
-Anything else is refused. The reason is named in the ingest summary the adapter prints, and the raw update stays in the capture file under `state/procevent-inbox/`; the captured result itself carries only the poll's own status, not the verdict. If the refused sender is already on the allowlist he is told why in one sentence - see [When a message is refused](#when-a-message-is-refused).
+Anything else is refused, and where it is refused depends on who sent it.
+
+A message from a sender nobody allowlisted is dropped by the poll itself, before anything is written: it leaves no capture file, no line in an ingest summary, and no receipt. The bot's link opens for anybody, so a stranger's message must cost nothing on this machine at all - not even a file.
+
+A message from an allowlisted sender that is refused for its *shape* - a forward, a `via_bot` composition, a bot account, empty text - is legitimate traffic the captain sent, so it is captured like any other. The reason is named in the ingest summary the adapter prints, and the raw update stays in the capture file under `state/procevent-inbox/`; the captured result itself carries only the poll's own status, not the verdict. He is also told why in one sentence - see [When a message is refused](#when-a-message-is-refused).
 
 Two of those deserve the reasoning spelled out.
 

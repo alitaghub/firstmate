@@ -295,7 +295,16 @@ cmd_poll() {
       # to disk, so a replay after a crash simply drops the same updates again.
       batch_high=$(printf '%s' "$result" | jq -r '
         [.[] | select((.update_id | type) == "number") | .update_id] | max // empty' 2>/dev/null) || batch_high=
-      case "$batch_high" in ''|*[!0-9]*) ;; *) offset=$((batch_high + 1)) ;; esac
+      case "$batch_high" in
+        ''|*[!0-9]*)
+          # No id to advance past, so the next window is the same window.
+          # Inventing an offset here would confirm updates nobody read; waiting
+          # on the transport backoff instead keeps a window this poll cannot
+          # make progress on from becoming a request storm.
+          sleep "$TRANSPORT_BACKOFF"
+          ;;
+        *) offset=$((batch_high + 1)) ;;
+      esac
       continue
     fi
     printf '%s' "$kept" | jq -c '.' > "$payload" || { emit_result error "$offset" 0 "cannot stage captured updates"; return 0; }
