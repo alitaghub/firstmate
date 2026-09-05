@@ -11,6 +11,18 @@ That is the missing half when finished work or a one-word decision would otherwi
 The channel ships inert.
 With no token and no allowlist, nothing is polled, nothing is sent, and no Telegram call is ever made.
 
+## This has never been run against a live Telegram bot
+
+Read this before switching it on.
+No bot token and no chat id were ever supplied while this was built, so no Telegram resource was created, configured, or called even once.
+Every check below - the allowlist, the refusal replies, the long poll, the outbound push - is proven against committed fixture messages and a fake connection that stands in for the network, and nothing else.
+Everything this document says about how Telegram itself behaves comes from Telegram's own documentation, not from watching it happen.
+
+What that does and does not mean.
+The decisions this channel makes about a message are tested hard: a suite drives real and hostile updates through the actual code and fails if any check is removed.
+What is untested is the wire - whether the real API answers the shape expected, whether a real bot delivers, whether a real message arrives looking the way the fixtures assume.
+The first message the captain sends is the first real test of that half, so treat the first exchange as a trial rather than a finished feature, and expect to fix something.
+
 ## What an inbound message can and cannot do
 
 An accepted message does exactly one thing: it becomes a captain inbox note.
