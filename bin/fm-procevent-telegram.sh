@@ -273,14 +273,20 @@ cmd_poll() {
       sleep "$TRANSPORT_BACKOFF"
       continue
     fi
-    failures=0
+    # NOT reset here. A request that succeeded is not the same as a poll that
+    # got somewhere: an unadvanceable window is a successful transport carrying
+    # nothing usable, and resetting on the request would let it repeat forever.
+    # Progress means the poll moved forward - an idle window that confirms we
+    # are up to date, a window whose offset advanced, or a batch we captured.
     count=$(printf '%s' "$result" | jq -r 'if type == "array" then length else "invalid" end' 2>/dev/null) || count=invalid
     case "$count" in
       invalid|''|*[!0-9]*) emit_result error "$offset" 0 "telegram returned a result that is not an update list"; return 0 ;;
     esac
     if [ "$count" -eq 0 ]; then
       # An idle window is not news. Open the next one rather than capturing a
-      # result whose only content is that nothing happened.
+      # result whose only content is that nothing happened. It IS progress: the
+      # channel answered and we are up to date, so the budget resets.
+      failures=0
       continue
     fi
     kept=$(keep_worth_capturing "$result") || { emit_result error "$offset" 0 "cannot read the captured updates"; return 0; }
@@ -298,12 +304,25 @@ cmd_poll() {
       case "$batch_high" in
         ''|*[!0-9]*)
           # No id to advance past, so the next window is the same window.
-          # Inventing an offset here would confirm updates nobody read; waiting
-          # on the transport backoff instead keeps a window this poll cannot
-          # make progress on from becoming a request storm.
+          # Inventing an offset here would confirm updates nobody read, so this
+          # waits instead - but it waits on the SAME counter and backoff as
+          # every other repeating failure, so a window this poll can never get
+          # past ends in a visible `unreachable` rather than looping until the
+          # process dies. Every other repeating failure in this loop is bounded;
+          # this one must be too, or the captain sees an armed channel that
+          # reads nothing and is told nothing.
+          failures=$((failures + 1))
+          if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
+            emit_result unreachable "$offset" 0 "telegram returned a window this poll cannot advance past"
+            return 0
+          fi
           sleep "$TRANSPORT_BACKOFF"
           ;;
-        *) offset=$((batch_high + 1)) ;;
+        *)
+          # The offset moved, so the poll got somewhere.
+          offset=$((batch_high + 1))
+          failures=0
+          ;;
       esac
       continue
     fi

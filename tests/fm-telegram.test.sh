@@ -26,6 +26,15 @@ TMP_ROOT=$(fm_test_tmproot fm-telegram)
 FM_TELEGRAM_API_BASE='http://127.0.0.1:1'
 export FM_TELEGRAM_API_BASE
 
+# The process-event runner keeps one owner per canonical source across homes
+# that share a store, so its claim root is per-machine by default. This file
+# arms the canonical `telegram` source; without a fixture-local root, a run
+# killed mid-test leaves a claim naming a home that no longer exists, and every
+# later run on this machine refuses with "cannot claim source: telegram".
+# Observed exactly that. Same convention tests/fm-bearings-board.test.sh uses.
+FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/procevent-claims"
+export FM_PROCEVENT_CLAIM_ROOT
+
 CAPTAIN_ID=987654321
 STRANGER_ID=111222333
 # Valid in shape, worthless in fact: no call is ever made with it.
@@ -652,6 +661,130 @@ test_a_gateway_page_keeps_the_channel_listening() {
   pass 'an edge gateway page re-arms and keeps listening instead of stopping'
 }
 
+# fake_telegram_unadvanceable <home> installs a curl that keeps answering with a
+# well-formed 200 whose updates carry no numeric update_id. The poll cannot
+# advance past it and cannot invent an offset, so this is the one window that
+# makes no progress however many times it is fetched.
+fake_telegram_unadvanceable() {
+  local home=$1 fakebin
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+printf '{"ok":true,"result":[{"message":{"text":"x"}}]}'
+printf '\n200'
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' "$fakebin"
+}
+
+test_a_window_that_can_never_advance_gives_up_visibly() {
+  # THE DEFECT IS THE REPETITION, not the single bad response. This window can
+  # never be advanced past, so before this was bounded the poll waited and
+  # retried it for as long as the process lived: an armed channel that reads
+  # nothing and tells nobody. Every other repeating failure here ends in a
+  # visible `unreachable`; this one must too.
+  local home out calls
+  home=$(new_home)
+  out=$(run_one_capture "$home" "$(fake_telegram_unadvanceable "$home")")
+
+  # It gave up, rather than looping until the runner's timeout killed it.
+  assert_contains "$out" 'autohandled: telegram' \
+    'the unadvanceable window never produced a result, so the poll never gave up'
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" telegram \
+    'the channel did not re-arm after giving up on an unadvanceable window'
+  [ "$(note_count "$home")" = 0 ] || fail 'an unadvanceable window queued a note'
+
+  # And it gave up ON THE BUDGET: it retried more than once, and it stopped at
+  # the same limit every other repeating failure stops at. Asserting only "it
+  # returned" would still pass if the branch bailed on the first attempt, which
+  # would hand the registration back to a runner that re-polls within seconds.
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) instead of waiting and retrying"
+  [ "$calls" -le 8 ] || fail "the poll made $calls attempts on a window it can never advance past - the budget is not bounding it"
+  pass 'a window the poll can never advance past ends in a bounded, visible give-up'
+}
+
+test_an_idle_channel_never_reports_itself_unreachable() {
+  # The guard on the fix above: the retry budget now resets on PROGRESS rather
+  # than on a successful request. Resetting on the wrong condition is invisible
+  # in the test above and fatal here - a quiet chat would slowly exhaust the
+  # budget and declare a perfectly healthy channel dead.
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+# Twelve idle windows - more than the retry budget - then a real message.
+if [ "$n" -lt 12 ]; then printf '{"ok":true,"result":[]}'; printf '\n200'; exit 0; fi
+cat "$FM_TELEGRAM_TEST_FIRST"
+printf '\n200'
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s' "$(jq -cn --argjson uid "$CAPTAIN_ID" '
+    { ok: true, result: [ { update_id: 940, message: {
+        message_id: 5, date: 1757000000,
+        from: { id: $uid, is_bot: false, first_name: "Cap" },
+        chat: { id: $uid, type: "private" },
+        text: "still here" } } ] }')" > "$home/first-response.json"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  assert_contains "$out" 'autohandled: telegram' 'the idle channel produced no capture at all'
+  [ "$(note_count "$home")" = 1 ] || fail "a quiet channel lost the message that followed $(note_count "$home")"
+  assert_contains "$(note_bodies "$home")" 'still here' \
+    "the message after a long quiet spell did not reach the captain's notes"
+  pass 'a long quiet spell does not exhaust the retry budget and declare a healthy channel dead'
+}
+
+test_a_quiet_spell_between_two_rate_limit_bursts_resets_the_budget() {
+  # This is the test that pins WHICH condition resets the retry budget, and it
+  # is the only one that can tell the two candidate definitions apart. Resetting
+  # on a successful REQUEST is wrong - an unadvanceable window is a successful
+  # request carrying nothing - so the budget resets on PROGRESS instead: an idle
+  # window that confirms we are up to date, an advanced offset, or a capture.
+  # Without the idle half of that definition, two rate-limit bursts separated by
+  # a healthy quiet spell add up across the gap and declare a live channel dead.
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+# Seven rate limits (one under the budget), one idle window, seven more, then
+# the captain's message. Only a budget that reset at the idle window survives.
+if [ "$n" -lt 7 ] || { [ "$n" -ge 8 ] && [ "$n" -lt 15 ]; }; then
+  printf '{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 30"}'
+  printf '\n429'
+  exit 0
+fi
+if [ "$n" -eq 7 ]; then printf '{"ok":true,"result":[]}'; printf '\n200'; exit 0; fi
+cat "$FM_TELEGRAM_TEST_FIRST"
+printf '\n200'
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s' "$(jq -cn --argjson uid "$CAPTAIN_ID" '
+    { ok: true, result: [ { update_id: 950, message: {
+        message_id: 7, date: 1757000000,
+        from: { id: $uid, is_bot: false, first_name: "Cap" },
+        chat: { id: $uid, type: "private" },
+        text: "through both bursts" } } ] }')" > "$home/first-response.json"
+  printf '200' > "$home/first-status"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  assert_contains "$out" 'autohandled: telegram' 'the channel produced no capture across the two bursts'
+  [ "$(note_count "$home")" = 1 ] || fail "the message after two rate-limit bursts was lost ($(note_count "$home") notes)"
+  assert_contains "$(note_bodies "$home")" 'through both bursts' \
+    'the budget did not reset at the quiet spell, so a live channel was given up on'
+  pass 'a quiet spell between two rate-limit bursts resets the retry budget'
+}
+
 test_a_second_reader_stops_and_asks() {
   # 409 means another poller holds this bot. Re-arming would just trade the
   # conflict back and forth forever, so it must stop and be visible.
@@ -969,6 +1102,9 @@ test_an_unreachable_network_keeps_the_channel_listening
 test_a_rate_limit_keeps_the_channel_listening
 test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
+test_a_window_that_can_never_advance_gives_up_visibly
+test_an_idle_channel_never_reports_itself_unreachable
+test_a_quiet_spell_between_two_rate_limit_bursts_resets_the_budget
 test_an_over_limit_digest_is_cut_rather_than_dropped
 test_a_cut_never_splits_a_character
 test_a_refused_forward_from_the_captain_is_answered
