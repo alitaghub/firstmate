@@ -63,7 +63,7 @@ fm_private_dir_tighten() {  # <dir>...
   return 0
 }
 
-fm_private_dir_ensure "$STATE"
+fm_private_dir_ensure "$STATE" 2>/dev/null
 
 # Most wake-library consumers need only queue and lock primitives, including
 # deliberately minimal recovery fixtures and remote installations.
