@@ -16,9 +16,11 @@ TMP_ROOT=$(fm_test_tmproot fm-private-state-root)
 # Any script that creates the state root proves the contract; fm-lock.sh is the
 # earliest one a session runs, and it creates the root before loading most of
 # its libraries - the ordering that made this easy to get wrong.
+# Stderr is kept: healing a broken home has to say so out loud.
 create_state_root() {  # <home> <umask>
   local home=$1 mask=$2
-  ( umask "$mask"; FM_HOME="$home" "$ROOT/bin/fm-lock.sh" acquire >/dev/null 2>&1 || true )
+  STDERR_LOG="$TMP_ROOT/stderr.log"
+  ( umask "$mask"; FM_HOME="$home" "$ROOT/bin/fm-lock.sh" acquire >/dev/null 2>"$STDERR_LOG" || true )
 }
 
 dir_mode() {  # <dir>
@@ -56,7 +58,9 @@ test_existing_group_writable_root_heals() {
   assert_no_shared_write "$home/state" "an already group-writable state root"
   FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list >/dev/null 2>&1 \
     || fail "process-event work still refused a healed state root"
-  pass "a home left group-writable by an earlier run heals on the next one"
+  grep -q "$home/state" "$STDERR_LOG" \
+    || fail "healing a group-writable state root said nothing on stderr"
+  pass "a home left group-writable by an earlier run heals on the next one, out loud"
 }
 
 test_healthy_root_is_left_alone() {
@@ -67,7 +71,9 @@ test_healthy_root_is_left_alone() {
   create_state_root "$home" 022
   [ "$(dir_mode "$home/state")" = 755 ] \
     || fail "an ordinary 755 state root was rewritten to $(dir_mode "$home/state")"
-  pass "an ordinary state root keeps the mode its home already had"
+  [ ! -s "$STDERR_LOG" ] \
+    || fail "an untouched state root still warned: $(cat "$STDERR_LOG")"
+  pass "an ordinary state root keeps the mode its home already had, silently"
 }
 
 test_created_private_under_a_group_writable_umask

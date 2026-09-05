@@ -52,11 +52,18 @@ fm_private_dir_ensure() {  # <dir>...
 
 # Remove group and other write from an existing real directory. Never widens a
 # mode, never follows a symlink, and never fails the caller: see the header.
+# A directory that actually had to be tightened is named on stderr, so a heal
+# of an already-broken home is not a silent change of the privacy contract.
 fm_private_dir_tighten() {  # <dir>...
-  local dir
+  local dir mode
   for dir in "$@"; do
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
-    chmod go-w "$dir" 2>/dev/null || true
+    mode=$(stat -c %a "$dir" 2>/dev/null || stat -f %Lp "$dir" 2>/dev/null) || continue
+    case "$mode" in *[!0-7]*|'') continue ;; esac
+    [ $((8#$mode & 8#022)) -ne 0 ] || continue
+    chmod go-w "$dir" 2>/dev/null || continue
+    printf 'warning: %s was mode %s, writable by other accounts; tightened it\n' \
+      "$dir" "$mode" >&2
   done
   return 0
 }
