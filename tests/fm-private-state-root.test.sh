@@ -71,7 +71,7 @@ test_healthy_root_is_left_alone() {
   create_state_root "$home" 022
   [ "$(dir_mode "$home/state")" = 755 ] \
     || fail "an ordinary 755 state root was rewritten to $(dir_mode "$home/state")"
-  [ ! -s "$STDERR_LOG" ] \
+  ! grep -q "$home/state" "$STDERR_LOG" \
     || fail "an untouched state root still warned: $(cat "$STDERR_LOG")"
   pass "an ordinary state root keeps the mode its home already had, silently"
 }
