@@ -608,6 +608,31 @@ The session-start digest separately prints a "Public commitments" subsection fro
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
+## Telegram captain channel (.env / config/telegram-allow)
+
+The Telegram channel lets the captain send firstmate a message from a phone and lets firstmate push a notification back.
+It is off unless BOTH of these exist in the home, and both are local and gitignored:
+
+- `.env` holds `FM_TELEGRAM_TOKEN=<bot token>`, the same file and the same shape as the Relay pairing token.
+  An environment `FM_TELEGRAM_TOKEN` overrides the file for a direct client invocation.
+- `config/telegram-allow` lists the allowed numeric Telegram ids, one per line, with an optional trailing `# comment`.
+
+With either missing the channel is inert and no Telegram call is ever made.
+It is not inherited by secondmate homes: the captain's phone reaches the main home, and a secondmate reports through its parent channel.
+
+The allowlist is one list of numeric ids, and it is checked against both `message.from.id` and `message.chat.id`, because in the private chat this channel is built for they are the same number.
+A line that is not a numeric id, or a list that names nobody, disables the channel rather than shrinking to the entries that happened to parse.
+Ids are matched numerically and never by username, because a released username can be claimed by somebody else.
+
+An accepted message becomes one captain inbox note and nothing else.
+It never merges, never answers a held captain decision, never spawns, and never runs anything from its own content.
+
+Reading is a registered process-event source armed with `bin/fm-procevent-telegram.sh arm`, so the blocking long poll never holds a conversational turn and the runner's one-owner-per-source rule keeps two homes sharing a store off the same bot token.
+The read position lives in `state/telegram.offset` and the queued-message receipts in `state/telegram.seen/`; both are removed by retiring the source only if the operator removes them deliberately, because they are what makes a replay after a crash silent.
+Deleting either configuration file stops the poll within its current window, which is the fastest local kill switch.
+
+See [`telegram.md`](telegram.md) for setup, the security model, revocation, and what outbound may carry; each script's header and `--help` own the exact flags and mechanics.
+
 ## Trusted external process-event adapters (config/extensions.d)
 
 A home can explicitly enable a trusted external `process-event-adapter/1` package without adding package code to Firstmate.

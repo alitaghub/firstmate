@@ -8,6 +8,8 @@
 #           answer. Writes a durable record and appends ONE `check` wake, so the
 #           note survives a crash and is presented at firstmate's next drain.
 #           This is the only subcommand that touches firstmate's wake queue.
+#           `--source <name>` records which input surface the captain used and
+#           defaults to `text`; the Telegram channel passes `telegram`.
 #   say     Same as `note`, but the body comes from spoken audio on stdin.
 #           Speech is an INPUT METHOD here, not an architecture: it transcribes
 #           and then takes exactly the `note` path.
@@ -19,7 +21,7 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
+#   fm-inbox.sh note [--source <name>] <text>...   | ... note -   (body from stdin)
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
@@ -196,15 +198,25 @@ queue_note() {
 }
 
 cmd_note() {
-  local body
+  local body source=text
+  # Only a LEADING --source is a flag, so `note <text>...` keeps its exact
+  # existing meaning for every caller that passes the captain's words first.
+  if [ "${1-}" = "--source" ]; then
+    [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--source <name>] <text>..."
+    case "$2" in
+      ''|*[!a-z0-9-]*) die "note source must be lowercase letters, digits, or dashes" ;;
+    esac
+    source=$2
+    shift 2
+  fi
   if [ "$#" -eq 0 ]; then
-    die "usage: fm-inbox.sh note <text>...   (or: note - to read stdin)"
+    die "usage: fm-inbox.sh note [--source <name>] <text>...   (or: note - to read stdin)"
   elif [ "$1" = "-" ]; then
     body=$(cat)
   else
     body="$*"
   fi
-  queue_note text "$body"
+  queue_note "$source" "$body"
 }
 
 # ---------------------------------------------------------------- say
