@@ -397,6 +397,129 @@ test_an_unreachable_network_keeps_the_channel_listening() {
   pass 'an unreachable network re-arms and keeps listening instead of stopping'
 }
 
+# fake_telegram_status <home> <http-status> <body> installs a curl that answers
+# the first call with that HTTP status and body - appending the status on its
+# own trailing line, as `curl -w` does for the real transport - and then idles
+# with an empty update list.
+fake_telegram_status() {
+  local home=$1 status=$2 body=$3 fakebin
+  fakebin=$(fm_fakebin "$home")
+  printf '%s' "$body" > "$home/first-response.json"
+  printf '%s' "$status" > "$home/first-status"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+if [ "$n" = 0 ]; then
+  cat "$FM_TELEGRAM_TEST_FIRST"
+  printf '\n%s' "$(cat "$FM_TELEGRAM_TEST_STATUS")"
+else
+  sleep 1
+  printf '{"ok":true,"result":[]}\n200'
+fi
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' "$fakebin"
+}
+
+# run_one_capture <home> <fakebin> -> the runner's output for a single capture
+run_one_capture() {
+  local home=$1 fakebin=$2 out
+  export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TEST_FIRST="$home/first-response.json" \
+    FM_TELEGRAM_TEST_STATUS="$home/first-status"
+  FM_HOME="$home" PATH="$fakebin:$PATH" "$ADAPTER" arm >/dev/null || fail 'arming failed'
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 60 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TEST_FIRST FM_TELEGRAM_TEST_STATUS
+  printf '%s\n' "$out"
+}
+
+assert_channel_kept_listening() {  # <home> <out> <what>
+  local home=$1 out=$2 what=$3
+  assert_contains "$out" 'autohandled: telegram' "a $what was left for a handler instead of being absorbed"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" telegram \
+    "the channel did not re-arm after a $what, so the next message would never arrive"
+  [ -s "$home/state/.wake-queue" ] && fail "a $what woke firstmate"
+  [ "$(note_count "$home")" = 0 ] || fail "a $what queued a note"
+}
+
+test_a_rate_limit_keeps_the_channel_listening() {
+  # 429 carries its own retry-after: Telegram is telling the poller to wait, not
+  # that anything is wrong with the channel.
+  local home out
+  home=$(new_home)
+  out=$(run_one_capture "$home" "$(fake_telegram_status "$home" 429 \
+    '{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 30"}')")
+  assert_channel_kept_listening "$home" "$out" 'rate limit'
+  pass 'a rate limit re-arms and keeps listening instead of stopping'
+}
+
+test_a_gateway_page_keeps_the_channel_listening() {
+  # An edge 502 answers with HTML, not Bot API JSON. It is gone seconds later.
+  local home out
+  home=$(new_home)
+  out=$(run_one_capture "$home" "$(fake_telegram_status "$home" 502 \
+    '<html><head><title>502 Bad Gateway</title></head><body>502 Bad Gateway</body></html>')")
+  assert_channel_kept_listening "$home" "$out" 'gateway page'
+  pass 'an edge gateway page re-arms and keeps listening instead of stopping'
+}
+
+test_a_second_reader_stops_and_asks() {
+  # 409 means another poller holds this bot. Re-arming would just trade the
+  # conflict back and forth forever, so it must stop and be visible.
+  local home out
+  home=$(new_home)
+  out=$(run_one_capture "$home" "$(fake_telegram_status "$home" 409 \
+    '{"ok":false,"error_code":409,"description":"Conflict: terminated by other getUpdates request"}')")
+  assert_contains "$out" 'not-autohandled' 'a conflicting second reader was quietly marked handled'
+  assert_grep 'procevent telegram' "$home/state/.wake-queue" \
+    'a conflicting second reader raised no wake, so it would fail silently'
+  [ "$(note_count "$home")" = 0 ] || fail 'a conflicting poll queued a note'
+  pass 'a second reader on the same bot stops and raises a wake'
+}
+
+# --- the message limit ------------------------------------------------------
+
+# sending_curl <home> installs a curl that records the text it was asked to send
+# and answers as the Bot API does on success.
+sending_curl() {
+  local home=$1 fakebin
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+for _a in "$@"; do
+  case "$_a" in text=*) printf '%s' "${_a#text=}" > "$FM_TELEGRAM_TEST_SENT" ;; esac
+done
+printf '{"ok":true,"result":{"message_id":1}}\n200'
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' "$fakebin"
+}
+
+test_an_over_limit_digest_is_cut_rather_than_dropped() {
+  # Telegram refuses text over 4096 characters. The digest that follows a long
+  # injection wedge is exactly the one that grows past it, and silently losing
+  # that push is worse than losing its tail.
+  local home fakebin long out sent
+  home=$(new_home)
+  fakebin=$(sending_curl "$home")
+  export FM_TELEGRAM_TEST_SENT="$home/sent.txt"
+  long="Supervisor escalate: $(head -c 5000 /dev/zero | tr '\0' 'x')"
+
+  out=$(printf '%s' "$long" | PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" notify - 2>&1) \
+    || fail "notify refused an over-limit digest instead of cutting it: $out"
+  assert_contains "$out" 'sent to' 'the over-limit digest was not sent'
+  sent=$(cat "$FM_TELEGRAM_TEST_SENT")
+  [ "${#sent}" -le 4096 ] || fail "notify sent ${#sent} characters, over Telegram's 4096 limit"
+  assert_contains "$sent" 'the full text is in the terminal' \
+    'the cut digest does not say it was cut'
+  assert_contains "$sent" 'Supervisor escalate' \
+    'the cut kept the tail instead of the front, losing the earliest items'
+  unset FM_TELEGRAM_TEST_SENT
+  pass 'a digest over the message limit is cut at the front and still delivered'
+}
+
 # --- the token --------------------------------------------------------------
 
 test_the_token_is_never_printed() {
@@ -484,5 +607,9 @@ test_a_replayed_capture_is_silent
 test_a_message_travels_from_the_poll_to_one_wake
 test_a_broken_channel_stops_and_asks
 test_an_unreachable_network_keeps_the_channel_listening
+test_a_rate_limit_keeps_the_channel_listening
+test_a_gateway_page_keeps_the_channel_listening
+test_a_second_reader_stops_and_asks
+test_an_over_limit_digest_is_cut_rather_than_dropped
 test_the_token_is_never_printed
 test_the_token_never_reaches_a_command_line

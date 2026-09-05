@@ -153,9 +153,19 @@ The read position moves only after a note is safely on disk.
 The other order would confirm the message to Telegram, which then drops it, and a crash at that moment would lose the captain's instruction outright.
 So the channel chooses a possible duplicate over a possible loss, and then removes the duplicate: every queued message leaves a receipt, and a replay skips anything that already has one.
 
-**Two failure classes, two different answers.**
-If the request never gets an answer at all - no wifi, no DNS, a VPN restart, a laptop waking up - the channel treats it as *unreachable*: it re-arms itself and keeps polling, silently, because that class fixes itself and a brief outage must not take the channel down while the captain is away.
-If Telegram answers and *refuses* - a rejected token, a second reader on the same bot, a `409 Conflict` - the channel stops and raises a wake instead, because re-polling a refusal just burns the same failure in a loop until somebody changes something.
+**Two failure classes, two different answers.** The line is *will this fix itself*, not *did the request get an answer*.
+
+*Unreachable* - re-arms and keeps polling, silently, because a brief outage must not take the channel down while the captain is away:
+
+- no answer at all: no wifi, no DNS, a VPN restart, a laptop waking up;
+- `429 Too Many Requests`, which says in its own body how long to wait;
+- any `5xx`, which is Telegram's edge failing;
+- a body that is not Bot API JSON at all, which is an edge gateway page wearing the wrong clothes.
+
+*Refused* - stops and raises a wake, because re-polling burns the same failure in a loop until somebody changes something:
+
+- `401 Unauthorized`: the token was rejected or revoked;
+- `409 Conflict`: a second reader is polling the same bot.
 
 **The one hard limit: Telegram keeps an unconfirmed message for 24 hours.**
 If the machine is off for longer than that, messages older than a day are gone from Telegram's side and cannot be recovered.

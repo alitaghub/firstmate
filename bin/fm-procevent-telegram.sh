@@ -32,8 +32,9 @@
 #            acknowledging. Takes the same channel lock as handle, so running it
 #            by hand next to a live runner cannot double-queue a note.
 # classify   Print the captured outcome class: updates, unreachable, error, or
-#            malformed. `unreachable` is a transport failure that fixes itself
-#            and re-arms; `error` is a refusal from Telegram that stops and asks.
+#            malformed. `unreachable` is a failure that fixes itself - no route,
+#            a 429, a 5xx, or a body that is not Bot API JSON - and re-arms;
+#            `error` is Telegram refusing the call (401, 409) and stops to ask.
 # terminal   Every capture ends its registration; handle re-arms the next one.
 # self-announcing
 #            Declares that a fully applied capture announces itself downstream:
@@ -188,9 +189,9 @@ cmd_poll() {
     if [ "$rc" -ne 0 ]; then
       failures=$((failures + 1))
       if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-        # curl never got an answer at all: no DNS, no route, no reply. That is
-        # the one failure class that fixes itself, so it is NOT an `error` and
-        # must not disarm the channel over a wifi blip.
+        # curl never got an answer at all: no DNS, no route, no reply. Like a
+        # 429, a 5xx, or an edge gateway page, that fixes itself, so it is NOT
+        # an `error` and must not disarm the channel over a wifi blip.
         emit_result unreachable "$offset" 0 "$(fm_telegram_redact "$response" | tr '\n' ' ')"
         return 0
       fi
@@ -199,7 +200,11 @@ cmd_poll() {
     fi
     failures=0
     if ! result=$(fm_telegram_api_result "$response" 2>&1); then
-      emit_result error "$offset" 0 "$(fm_telegram_redact "$result" | tr '\n' ' ')"
+      if fm_telegram_failure_is_transient "$response"; then
+        emit_result unreachable "$offset" 0 "$(fm_telegram_redact "$result" | tr '\n' ' ')"
+      else
+        emit_result error "$offset" 0 "$(fm_telegram_redact "$result" | tr '\n' ' ')"
+      fi
       return 0
     fi
     count=$(printf '%s' "$result" | jq -r 'if type == "array" then length else "invalid" end' 2>/dev/null) || count=invalid

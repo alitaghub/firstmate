@@ -40,6 +40,13 @@ usage() {
 }
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
+# Telegram's sendMessage refuses text longer than this. A digest that grew past
+# it - the one that follows a long injection wedge - would otherwise be the
+# single push that never arrives. The front is kept because the daemon puts the
+# earliest and usually most important items first.
+TEXT_LIMIT=4096
+CUT_MARKER=$'\n[cut - the full text is in the terminal]'
+
 require_config() {
   fm_telegram_load_config || die "$FM_TELEGRAM_ERROR"
 }
@@ -60,6 +67,9 @@ cmd_notify() {
     text="$*"
   fi
   [ -n "${text//[[:space:]]/}" ] || die "refusing to send an empty message"
+  if [ "${#text}" -gt "$TEXT_LIMIT" ]; then
+    text="${text:0:$((TEXT_LIMIT - ${#CUT_MARKER}))}$CUT_MARKER"
+  fi
 
   require_config
   # The recipient is read from the allowlist rather than named by the caller, so

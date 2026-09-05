@@ -155,30 +155,62 @@ fm_telegram_redact() {
 # Call one Bot API method. The URL carries the token, so it is handed to curl
 # through a config file on stdin: an argument would be visible to every `ps` on
 # the machine. Method parameters are ordinary --data-urlencode arguments and
-# carry no secret. Prints the response body; on failure prints the redacted
-# curl diagnostic to stderr and returns nonzero.
+# carry no secret. Prints the response body, records the HTTP status in
+# FM_TELEGRAM_HTTP_STATUS, and on failure prints the redacted curl diagnostic to
+# stderr and returns nonzero.
 fm_telegram_api() {
-  local method=$1 err_file rc=0 body err
+  local method=$1 err_file rc=0 raw err
   shift
   [ -n "$FM_TELEGRAM_TOKEN_VALUE" ] || { printf 'error: Telegram is not configured\n' >&2; return 1; }
   err_file=$(mktemp "${TMPDIR:-/tmp}/fm-telegram-err.XXXXXX") || return 1
-  body=$(printf 'url = "%s/bot%s/%s"\n' \
+  raw=$(printf 'url = "%s/bot%s/%s"\n' \
       "$FM_TELEGRAM_API_BASE" "$FM_TELEGRAM_TOKEN_VALUE" "$method" \
-    | curl -sS --max-time "$FM_TELEGRAM_TIMEOUT" --config - "$@" 2>"$err_file") || rc=$?
+    | curl -sS --max-time "$FM_TELEGRAM_TIMEOUT" --config - -w '\n%{http_code}' "$@" 2>"$err_file") || rc=$?
   err=$(cat "$err_file" 2>/dev/null || true)
   rm -f -- "$err_file"
   if [ "$rc" -ne 0 ]; then
     printf 'error: telegram %s failed: %s\n' "$method" "$(fm_telegram_redact "$err")" >&2
     return "$rc"
   fi
-  printf '%s' "$body"
+  printf '%s' "$raw"
+}
+
+# The HTTP status rides back on its own trailing line, so a response survives a
+# command substitution with its status still attached. Both readers below treat
+# a response that arrived without one as a body of its own, which is what every
+# caller saw before the status was carried at all.
+fm_telegram_response_status() {  # <raw-response>
+  case "${1-}" in
+    *$'\n'[0-9][0-9][0-9]) printf '%s' "${1##*$'\n'}" ;;
+  esac
+}
+
+fm_telegram_response_body() {  # <raw-response>
+  case "${1-}" in
+    *$'\n'[0-9][0-9][0-9]) printf '%s' "${1%$'\n'*}" ;;
+    *) printf '%s' "${1-}" ;;
+  esac
+}
+
+# Will a failed call fix itself? A 429 says in its own body how long to wait, a
+# 5xx is Telegram's edge failing, and a body that is not the Bot API's JSON at
+# all is an edge gateway page - every one of those is gone seconds later. A 401
+# or a 409 is a rejected token or a second reader on the same bot, which nothing
+# but the captain changes, so re-polling it just burns the same failure.
+fm_telegram_failure_is_transient() {  # <raw-response>
+  case "$(fm_telegram_response_status "${1-}")" in
+    429|5[0-9][0-9]) return 0 ;;
+  esac
+  fm_telegram_response_body "${1-}" | jq -e 'type == "object" and has("ok")' >/dev/null 2>&1 || return 0
+  return 1
 }
 
 # Print the "result" array of an API response, or fail with the API's own
 # description. A Bot API error body never contains the token, but it is
 # redacted anyway rather than trusting that.
 fm_telegram_api_result() {
-  local response=$1 ok description
+  local response ok description
+  response=$(fm_telegram_response_body "$1")
   ok=$(printf '%s' "$response" | jq -r 'if type == "object" then (.ok // false) else "invalid" end' 2>/dev/null) || ok=invalid
   if [ "$ok" != true ]; then
     description=$(printf '%s' "$response" | jq -r '(.description // "unparseable response")' 2>/dev/null) \
