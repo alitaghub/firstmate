@@ -158,7 +158,7 @@ The poll runs as a registered process-event source, so the blocking call never h
 **A message is never lost to a crash, but it can be delivered twice.**
 The read position moves only after a note is safely on disk.
 The other order would confirm the message to Telegram, which then drops it, and a crash at that moment would lose the captain's instruction outright.
-So the channel chooses a possible duplicate over a possible loss, and then removes the duplicate: every queued message leaves a receipt, and a replay skips anything that already has one.
+So the channel chooses a possible duplicate over a possible loss, and then removes the duplicate: every message that was acted on leaves a receipt - one for a queued note, one for a refusal the captain was told about - and a replay skips anything that already has one. A message refused in silence leaves nothing behind, so a stranger cannot fill that directory by messaging the bot.
 
 **Two failure classes, two different answers.** The line is *will this fix itself*, not *did the request get an answer*.
 

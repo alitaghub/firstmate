@@ -651,6 +651,40 @@ test_a_refused_stranger_gets_total_silence() {
   pass 'a stranger is refused in total silence, with no outbound call at all'
 }
 
+test_a_refused_stranger_leaves_no_receipt() {
+  # A receipt exists to stop a replay repeating a buzz. A stranger is never
+  # buzzed, so his receipt would suppress nothing - it would only let anyone who
+  # found the bot's public link drop a permanent file on the captain's disk, one
+  # per message, in a directory nothing prunes.
+  local home fakebin receipts
+  home=$(new_home)
+  fakebin=$(recording_curl "$home")
+  export FM_TELEGRAM_TEST_OUTBOUND="$home/outbound.log"
+  PATH="$fakebin:$PATH" ingest "$home" "$(capture "$home" "$(jq -cn --argjson sid "$STRANGER_ID" '
+    [ { update_id: 702, message: {
+        message_id: 6, date: 1757000000,
+        from: { id: $sid, is_bot: false, first_name: "Nobody" },
+        chat: { id: $sid, type: "private" },
+        text: "probe" } } ]')")" >/dev/null
+  receipts=$(find "$home/state/telegram.seen" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$receipts" = 0 ] \
+    || fail "a stranger's refused message left $receipts receipt(s) on disk"
+  # Control: the captain's own refused message DOES leave one, so the assertion
+  # above is about who was answered, not about receipts never being written.
+  PATH="$fakebin:$PATH" ingest "$home" "$(capture "$home" "$(jq -cn --argjson uid "$CAPTAIN_ID" '
+    [ { update_id: 703, message: {
+        message_id: 7, date: 1757000000,
+        from: { id: $uid, is_bot: false, first_name: "Cap" },
+        chat: { id: $uid, type: "private" },
+        forward_origin: { type: "user", date: 1756000000 },
+        text: "somebody else wrote this" } } ]')")" >/dev/null
+  receipts=$(find "$home/state/telegram.seen" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$receipts" = 1 ] \
+    || fail "an answered refusal left $receipts receipt(s) instead of one"
+  unset FM_TELEGRAM_TEST_OUTBOUND
+  pass 'only a refusal the captain was told about leaves a receipt'
+}
+
 # --- the token --------------------------------------------------------------
 
 test_the_token_is_never_printed() {
@@ -746,5 +780,6 @@ test_a_cut_never_splits_a_character
 test_a_refused_forward_from_the_captain_is_answered
 test_a_replayed_refusal_is_answered_only_once
 test_a_refused_stranger_gets_total_silence
+test_a_refused_stranger_leaves_no_receipt
 test_the_token_is_never_printed
 test_the_token_never_reaches_a_command_line

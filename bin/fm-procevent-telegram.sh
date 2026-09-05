@@ -57,9 +57,10 @@
 # file. The refused sender is told only when he is already on the allowlist -
 # answering anyone else would confirm the bot exists to whoever probed it.
 #
-# Duplicate suppression. EVERY update that was acted on leaves a receipt under
+# Duplicate suppression. Every update that was acted on leaves a receipt under
 # state/telegram.seen/ - one for a queued note, one for a refusal that was
-# answered - and a replay skips any update that already has one. The offset is
+# answered - and a replay skips any update that already has one. A refusal
+# nobody was told about writes nothing, so a stranger cannot fill the directory. The offset is
 # persisted only AFTER a note is safely on disk, because the two crash orders are not equally bad: the other order
 # confirms the message to Telegram, which then drops it, and the captain's
 # instruction is gone. So this channel chooses "possibly a duplicate" over
@@ -317,14 +318,15 @@ refusal_sentence() { # <reason>
 # allowlisted chat `notify` resolves, never to the chat the refused message
 # arrived on, so a refusal in a group cannot make the bot post into that group.
 # Every failure is swallowed: a reply that cannot be sent must not stop ingest.
-tell_the_captain_it_was_refused() { # <update> <reason>
+tell_the_captain_it_was_refused() { # <update> <reason> -> 0 when a reply went out
   local update=$1 reason=$2 from_id
   from_id=$(printf '%s' "$update" | jq -r '
-    if (.message.from.id | type) == "number" then (.message.from.id | tostring) else "" end' 2>/dev/null) || return 0
-  fm_telegram_id_allowed "$from_id" || return 0
+    if (.message.from.id | type) == "number" then (.message.from.id | tostring) else "" end' 2>/dev/null) || return 1
+  fm_telegram_id_allowed "$from_id" || return 1
   refusal_sentence "$reason" | FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_TELEGRAM_TIMEOUT="$REPLY_TIMEOUT" \
     "$SCRIPT_DIR/fm-telegram.sh" notify - >/dev/null 2>&1 || true
+  return 0
 }
 
 cmd_ingest() { # <result-file>
@@ -357,8 +359,12 @@ cmd_ingest() { # <result-file>
       # Named, counted, and never queued. A rejection is the channel working.
       printf 'rejected: update %s %s\n' "$update_id" "${verdict#reject:}"
       rejected=$((rejected + 1))
-      if ! update_seen "$update_id"; then
-        tell_the_captain_it_was_refused "$update" "${verdict#reject:}"
+      update_seen "$update_id" && continue
+      # The receipt exists to stop a replay repeating a buzz, so only a refusal
+      # that actually reached the captain earns one. A stranger is answered with
+      # nothing, so a receipt for him would suppress a reply that was never
+      # coming and let anyone who found the bot leave a file per message here.
+      if tell_the_captain_it_was_refused "$update" "${verdict#reject:}"; then
         mark_seen "$update_id" "refused=${verdict#reject:}" \
           || die "cannot record update $update_id as refused"
       fi
