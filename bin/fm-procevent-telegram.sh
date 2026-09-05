@@ -57,8 +57,10 @@
 # file. The refused sender is told only when he is already on the allowlist -
 # answering anyone else would confirm the bot exists to whoever probed it.
 #
-# Duplicate suppression. The offset is persisted only AFTER a note is safely on
-# disk, because the two crash orders are not equally bad: the other order
+# Duplicate suppression. EVERY update that was acted on leaves a receipt under
+# state/telegram.seen/ - one for a queued note, one for a refusal that was
+# answered - and a replay skips any update that already has one. The offset is
+# persisted only AFTER a note is safely on disk, because the two crash orders are not equally bad: the other order
 # confirms the message to Telegram, which then drops it, and the captain's
 # instruction is gone. So this channel chooses "possibly a duplicate" over
 # "possibly lost" and then kills the duplicate - every queued update_id leaves a
@@ -88,8 +90,12 @@ POLL_WINDOW=50
 POLL_LIMIT=50
 # Consecutive transport failures tolerated before the poll gives up and reports
 # an unreachable channel. A network drop costs nothing because the offset is
-# unchanged and the channel re-arms itself.
-MAX_TRANSPORT_FAILURES=5
+# unchanged and the channel re-arms itself. The two multiply out to 35s of
+# waiting (the last attempt does not sleep), which outlasts the 30s a Telegram
+# 429 states; giving up sooner would re-arm straight back into the same limit.
+# The count carries the increase rather than the interval so an ordinary wifi
+# blip is still noticed within 5s of the network returning.
+MAX_TRANSPORT_FAILURES=8
 TRANSPORT_BACKOFF=5
 # Seconds a refusal reply may spend on its one sendMessage. Stated outright, not
 # as a fallback: sourcing bin/fm-telegram-lib.sh has already set
@@ -139,14 +145,14 @@ update_seen() {
   [ -f "$path" ] && [ ! -L "$path" ]
 }
 
-mark_seen() { # <update-id> <note-id>
+mark_seen() { # <update-id> <what-happened>
   local path tmp
   mkdir -p "$SEEN_DIR" || return 1
   chmod 700 "$SEEN_DIR" 2>/dev/null || true
   path=$(seen_path "$1")
   [ ! -L "$path" ] || return 1
   tmp=$(umask 077; mktemp "$SEEN_DIR/.seen.XXXXXX") || return 1
-  printf 'note=%s\n' "$2" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$2" > "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path"
 }
 
@@ -351,7 +357,11 @@ cmd_ingest() { # <result-file>
       # Named, counted, and never queued. A rejection is the channel working.
       printf 'rejected: update %s %s\n' "$update_id" "${verdict#reject:}"
       rejected=$((rejected + 1))
-      tell_the_captain_it_was_refused "$update" "${verdict#reject:}"
+      if ! update_seen "$update_id"; then
+        tell_the_captain_it_was_refused "$update" "${verdict#reject:}"
+        mark_seen "$update_id" "refused=${verdict#reject:}" \
+          || die "cannot record update $update_id as refused"
+      fi
       continue
     fi
     if update_seen "$update_id"; then
@@ -363,7 +373,7 @@ cmd_ingest() { # <result-file>
     [ -n "$note_id" ] || die "the captain note for update $update_id has no id"
     # The receipt lands AFTER the note is published, so the worst crash window
     # costs a duplicate note rather than a lost instruction.
-    mark_seen "$update_id" "$note_id" || die "cannot record update $update_id as queued"
+    mark_seen "$update_id" "note=$note_id" || die "cannot record update $update_id as queued"
     queued=$((queued + 1))
   done
 

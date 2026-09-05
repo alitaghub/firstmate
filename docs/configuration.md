@@ -616,6 +616,7 @@ It is off unless BOTH of these exist in the home, and both are local and gitigno
 - `.env` holds `FM_TELEGRAM_TOKEN=<bot token>`, the same file and the same shape as the Relay pairing token.
   An environment `FM_TELEGRAM_TOKEN` overrides the file for a direct client invocation.
 - `config/telegram-allow` lists the allowed numeric Telegram ids, one per line, with an optional trailing `# comment`.
+  Write exactly one. Reading accepts any listed id, but pushing refuses to guess a recipient from a longer list, so a second line silently turns outbound off while inbound keeps working.
 
 With either missing the channel is inert and no Telegram call is ever made.
 It is not inherited by secondmate homes: the captain's phone reaches the main home, and a secondmate reports through its parent channel.

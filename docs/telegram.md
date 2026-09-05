@@ -40,7 +40,7 @@ A message is accepted only when every one of these holds:
 - the sender is not a bot account;
 - it has non-empty text.
 
-Anything else is refused, counted, and named on the captured result.
+Anything else is refused. The reason is named in the ingest summary the adapter prints, and the raw update stays in the capture file under `state/procevent-inbox/`; the captured result itself carries only the poll's own status, not the verdict. If the refused sender is already on the allowlist he is told why in one sentence - see [When a message is refused](#when-a-message-is-refused).
 
 Two of those deserve the reasoning spelled out.
 
@@ -95,6 +95,8 @@ Five minutes, and the captain does the token step himself so it never appears in
    # ~/github/firstmate/config/telegram-allow
    987654321        # the captain
    ```
+
+   **Write exactly one id.** Reading accepts any id on the list, but pushing needs to know which chat to push *to*, and it will not guess: with a second line every outbound message is refused, so the phone goes quiet while inbound keeps working. This channel is a one-to-one private chat, so one line is the shape it is built for.
 
 6. **Turn on Telegram Two-Step Verification** (Settings, then Privacy and Security).
    The captain's Telegram account is now a credential to his machine, so it deserves a password rather than SMS alone, and this closes the SIM-swap path.

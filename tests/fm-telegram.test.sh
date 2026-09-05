@@ -364,7 +364,7 @@ fake_telegram_unreachable() {
 cat > /dev/null
 n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
 printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
-if [ "$n" -lt 5 ]; then
+if [ "$n" -lt 8 ]; then
   printf 'curl: (6) Could not resolve host: api.telegram.org\n' >&2
   exit 6
 fi
@@ -602,6 +602,33 @@ test_a_refused_forward_from_the_captain_is_answered() {
   pass 'a forward from the captain is refused and he is told why'
 }
 
+test_a_replayed_refusal_is_answered_only_once() {
+  # A capture is re-ingested whenever a later update in it fails to queue, and
+  # the adapter's own header invites running `ingest` by hand. Every update that
+  # was acted on leaves a receipt, so the second pass must stay quiet: a phone
+  # buzz costs more than a line of terminal text, and repeating one is how a
+  # channel earns being muted.
+  local home fakebin file calls
+  home=$(new_home)
+  fakebin=$(recording_curl "$home")
+  export FM_TELEGRAM_TEST_OUTBOUND="$home/outbound.log"
+  file=$(capture "$home" "$(jq -cn --argjson uid "$CAPTAIN_ID" '
+    [ { update_id: 800, message: {
+        message_id: 4, date: 1757000000,
+        from: { id: $uid, is_bot: false, first_name: "Cap" },
+        chat: { id: $uid, type: "private" },
+        forward_origin: { type: "user", date: 1756000000 },
+        text: "a colleague wrote this" } } ]')")
+
+  PATH="$fakebin:$PATH" ingest "$home" "$file" >/dev/null
+  PATH="$fakebin:$PATH" ingest "$home" "$file" >/dev/null
+
+  calls=$(grep -c '^call$' "$FM_TELEGRAM_TEST_OUTBOUND" || true)
+  [ "$calls" = 1 ] || fail "a replayed refusal sent $calls reply/replies instead of one"
+  unset FM_TELEGRAM_TEST_OUTBOUND
+  pass 'a replayed refusal is answered exactly once'
+}
+
 test_a_refused_stranger_gets_total_silence() {
   # A bot that answers an unknown sender confirms it exists to whoever probed
   # it. The check must not become a probe amplifier, so nothing goes out at all
@@ -717,6 +744,7 @@ test_a_second_reader_stops_and_asks
 test_an_over_limit_digest_is_cut_rather_than_dropped
 test_a_cut_never_splits_a_character
 test_a_refused_forward_from_the_captain_is_answered
+test_a_replayed_refusal_is_answered_only_once
 test_a_refused_stranger_gets_total_silence
 test_the_token_is_never_printed
 test_the_token_never_reaches_a_command_line
