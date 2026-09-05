@@ -1416,6 +1416,77 @@ test_telegram_push_failure_does_not_disturb_escalation() {
   pass "a failing Telegram push leaves the escalation delivered and the buffer cleared"
 }
 
+# Install a curl that records the outbound message text and answers like the Bot
+# API. It stands in for Telegram's HTTP endpoint, so "did the phone buzz" is an
+# observable fact rather than an absence of logging. No real call is ever made.
+telegram_curl_recorder() {  # <dir>
+  local dir=$1
+  cat > "$dir/fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+set -u
+for _a in "$@"; do
+  case "$_a" in text=*) printf '%s\n' "${_a#text=}" >> "$FM_TEST_TELEGRAM_SENT" ;; esac
+done
+cat >/dev/null
+printf '{"ok":true,"result":{"message_id":1}}'
+SH
+  chmod +x "$dir/fakebin/curl"
+  printf 'FM_TELEGRAM_TOKEN=1234:abcDEF-token\n' > "$dir/env"
+  printf '4242\n' > "$dir/allow"
+}
+
+# flush_with_telegram <dir> <state> <sent> <buzzed> [log]
+flush_with_telegram() {
+  local dir=$1 state=$2 sent=$3 buzzed=$4 log=${5:-$dir/daemon.log}
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_ESCALATE_BATCH_SECS=0 LOG="$log" \
+    FM_TELEGRAM_ENV_FILE="$dir/env" FM_TELEGRAM_ALLOW_FILE="$dir/allow" \
+    FM_TEST_TELEGRAM_SENT="$buzzed" \
+    escalate_flush "$state"
+}
+
+# The hourly pause re-surface restates a wait that has not changed. It is the one
+# escalation the phone channel must not carry: overnight it fires eight times
+# with only the age number moving.
+test_paused_resurface_digest_reaches_the_pane_but_not_the_phone() {
+  local dir state sent buzzed
+  dir=$(make_supercase telegram-paused-resurface)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  buzzed="$dir/buzzed.log"; : > "$buzzed"
+  printf '\342\235\257 \n' > "$dir/pane.txt"  # a proven-empty bare claude composer
+  telegram_curl_recorder "$dir"
+  escalate_add "$state" "$(pause_resurface_item 3600 fm-w1)"
+  afk_enter "$state"
+  flush_with_telegram "$dir" "$state" "$sent" "$buzzed" \
+    || fail "escalate_flush failed for a pause re-surface digest"
+  grep -F 'paused 3600s' "$sent" >/dev/null \
+    || fail "the pause re-surface digest did not reach the supervisor pane"
+  [ -s "$buzzed" ] && fail "the pause re-surface digest buzzed the captain's phone"
+  pass "a pause re-surface digest reaches the pane and never the phone"
+}
+
+# The sibling line from the same re-surface arm is a decision that needs him,
+# which is exactly what the phone channel exists to carry.
+test_captain_held_digest_reaches_both_the_pane_and_the_phone() {
+  local dir state sent buzzed
+  dir=$(make_supercase telegram-captain-held)
+  state="$dir/state"
+  sent="$dir/sent.log"; : > "$sent"
+  buzzed="$dir/buzzed.log"; : > "$buzzed"
+  printf '\342\235\257 \n' > "$dir/pane.txt"  # a proven-empty bare claude composer
+  telegram_curl_recorder "$dir"
+  escalate_add "$state" "captain-held 3600s (awaiting the captain, answer the held decision or release the hold): fm-w1"
+  afk_enter "$state"
+  flush_with_telegram "$dir" "$state" "$sent" "$buzzed" \
+    || fail "escalate_flush failed for a captain-held digest"
+  grep -F 'captain-held 3600s' "$sent" >/dev/null \
+    || fail "the captain-held digest did not reach the supervisor pane"
+  grep -F 'captain-held 3600s' "$buzzed" >/dev/null \
+    || fail "the captain-held digest did not reach the captain's phone"
+  pass "a captain-held digest reaches both the pane and the phone"
+}
+
 test_escalate_batch_age_uses_first_append() {
   local dir state fakebin sent capture
   dir=$(make_supercase batch-age)
@@ -2686,6 +2757,8 @@ test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
 test_telegram_push_failure_does_not_disturb_escalation
+test_paused_resurface_digest_reaches_the_pane_but_not_the_phone
+test_captain_held_digest_reaches_both_the_pane_and_the_phone
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate

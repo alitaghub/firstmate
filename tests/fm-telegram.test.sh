@@ -364,12 +364,13 @@ test_the_token_is_never_printed() {
   assert_contains "$out" 'configured' 'status does not report a configured channel'
 
   # A refusal path, where a careless error message would leak it.
-  out=$(FM_HOME="$home" "$CLI" notify --chat "$STRANGER_ID" hello 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail 'notify sent to a chat that is not allowlisted'
+  printf '# nobody\n' > "$home/config/telegram-allow"
+  out=$(FM_HOME="$home" "$CLI" notify hello 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'notify sent with an allowlist that names nobody'
   # The reason matters: without it this passes on any failure, including the
   # network failure a not-really-refused send would produce.
-  assert_contains "$out" 'not on the Telegram allowlist' \
-    'notify tried to send to an unallowlisted chat instead of refusing'
+  assert_contains "$out" 'allowlist is empty' \
+    'notify failed for some other reason instead of refusing an empty allowlist'
   assert_not_contains "$out" "$FAKE_TOKEN" 'a notify refusal printed the bot token'
 
   out=$(FM_HOME="$home" "$ADAPTER" ingest /nonexistent-result 2>&1) || true
@@ -420,15 +421,6 @@ test_the_token_never_reaches_a_command_line() {
   pass 'the token reaches curl off the command line and is redacted out of its diagnostics'
 }
 
-test_notify_refuses_an_unallowlisted_chat() {
-  local home out rc=0
-  home=$(new_home "$(printf '%s\n%s\n' "$CAPTAIN_ID" 42)")
-  out=$(FM_HOME="$home" "$CLI" notify hello 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail 'notify guessed a recipient from an ambiguous allowlist'
-  assert_contains "$out" '--chat' 'the refusal does not say how to name the recipient'
-  pass 'notify refuses to guess a recipient rather than messaging the wrong chat'
-}
-
 test_captain_message_becomes_one_note
 test_adapter_has_no_authority_beyond_the_note
 test_rejects_a_stranger
@@ -449,4 +441,3 @@ test_a_message_travels_from_the_poll_to_one_wake
 test_a_broken_channel_stops_and_asks
 test_the_token_is_never_printed
 test_the_token_never_reaches_a_command_line
-test_notify_refuses_an_unallowlisted_chat

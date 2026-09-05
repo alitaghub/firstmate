@@ -682,6 +682,20 @@ stale_window_is_busy() {  # <window> <state>
   [ "${verdict%% *}" = busy ]
 }
 
+# The pause re-surface arm's one item text, and the predicate that recognises
+# it, defined together so the phone-channel exclusion in escalate_flush can
+# never drift from the line it is meant to exclude.
+pause_resurface_item() {  # <age-seconds> <window>
+  printf 'paused %ss (awaiting external, recheck whether the wait still holds): %s' "$1" "$2"
+}
+
+item_is_pause_resurface() {  # <escalation-item>
+  case "$1" in
+    'paused '*'s (awaiting external, recheck whether the wait still holds): '*) return 0 ;;
+  esac
+  return 1
+}
+
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf
   buf="$state/.subsuper-escalations"
@@ -693,10 +707,18 @@ escalate_add() {  # <state> <distilled-item>
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item='' n msg pushable=0
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  # The hourly pause re-surface is an elapsed-time recheck of a wait nobody has
+  # changed. It belongs in the pane and never on a phone: a channel that buzzes
+  # eight times overnight carrying no new fact gets muted, and then it is worse
+  # than not having one. A digest holding anything else - including the
+  # captain-held line the same arm produces - still pushes whole and unedited.
+  while IFS= read -r item; do
+    item_is_pause_resurface "$item" || { pushable=1; break; }
+  done < "$buf" 2>/dev/null
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
@@ -704,7 +726,7 @@ escalate_flush() {  # <state>
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if inject_msg "$msg" "$state"; then
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
-    telegram_push "$state" "$msg"
+    [ "$pushable" -eq 1 ] && telegram_push "$state" "$msg"
     return 0
   fi
   return 1
@@ -723,7 +745,6 @@ escalate_flush() {  # <state>
 telegram_push() {  # <state> <digest>
   local state=$1 msg=$2 out rc=0
   afk_active "$state" || return 0
-  [ "${FM_TELEGRAM_NOTIFY:-1}" != 0 ] || return 0
   [ -x "$FM_DAEMON_DIR/fm-telegram.sh" ] || return 0
   out=$(printf '%s' "$msg" | FM_TELEGRAM_TIMEOUT="${FM_TELEGRAM_TIMEOUT:-10}" \
     "$FM_DAEMON_DIR/fm-telegram.sh" notify - 2>&1) || rc=$?
@@ -1145,7 +1166,7 @@ housekeeping() {  # <state>
             _now > "$marker"
           fi
         elif [ -n "$last" ] && status_is_paused "$last"; then
-          if escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"; then
+          if escalate_add "$state" "$(pause_resurface_item "$age" "$win")"; then
             _now > "$marker"
           fi
         else

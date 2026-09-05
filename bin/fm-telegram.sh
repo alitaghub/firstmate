@@ -2,7 +2,7 @@
 # fm-telegram.sh - the operator surface of the Telegram captain channel.
 #
 # Usage:
-#   fm-telegram.sh notify [--chat <id>] <text>...   | fm-telegram.sh notify -
+#   fm-telegram.sh notify <text>...   | fm-telegram.sh notify -
 #   fm-telegram.sh whoami
 #   fm-telegram.sh status
 #
@@ -13,8 +13,8 @@
 #         decision, a real blocker, anything destructive or irreversible, a
 #         needed credential. Never routine progress: a channel that cries wolf
 #         gets muted, and then it is worse than not having it.
-#         With one allowlisted id, --chat is unnecessary. With several it is
-#         required, and the id must be allowlisted.
+#         The recipient is the one allowlisted id; there is no way to name
+#         another chat, so a mistyped recipient cannot exist.
 #         A bot cannot start a conversation, so the captain must have messaged
 #         it at least once before this works.
 # whoami  Print the numeric chat id and user id of whoever last messaged the
@@ -58,12 +58,7 @@ allowlist_only_id() {
 }
 
 cmd_notify() {
-  local chat='' text response
-  if [ "${1-}" = "--chat" ]; then
-    [ "$#" -ge 2 ] || die "--chat needs a numeric id"
-    chat=$2
-    shift 2
-  fi
+  local chat text response
   [ "$#" -ge 1 ] || usage
   if [ "$1" = "-" ]; then
     text=$(cat)
@@ -73,13 +68,10 @@ cmd_notify() {
   [ -n "${text//[[:space:]]/}" ] || die "refusing to send an empty message"
 
   require_config
-  if [ -z "$chat" ]; then
-    chat=$(allowlist_only_id) \
-      || die "the allowlist holds several ids, so --chat <id> is required"
-  fi
-  # An outbound id must be allowlisted too. Otherwise a mistyped --chat would
-  # deliver the captain's private fleet state to a stranger's chat.
-  fm_telegram_id_allowed "$chat" || die "chat id is not on the Telegram allowlist: $chat"
+  # The recipient is read from the allowlist rather than named by the caller, so
+  # the captain's private fleet state can only ever go to the chat he approved.
+  chat=$(allowlist_only_id) \
+    || die "notify needs exactly one id on the Telegram allowlist: $(fm_telegram_allow_file)"
 
   response=$(fm_telegram_api sendMessage \
     --data-urlencode "chat_id=$chat" \
