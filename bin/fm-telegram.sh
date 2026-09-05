@@ -44,8 +44,35 @@ die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 # it - the one that follows a long injection wedge - would otherwise be the
 # single push that never arrives. The front is kept because the daemon puts the
 # earliest and usually most important items first.
-TEXT_LIMIT=4096
+#
+# The cut is measured in BYTES and left well under Telegram's 4096, for two
+# reasons that both end in a refused send. Bash counts characters only under a
+# UTF-8 locale and bytes under C, and the daemon inherits whatever locale
+# launched it; and Telegram counts UTF-16 code units, so one emoji costs two
+# against its limit while bash counts one. The headroom covers both.
+TEXT_LIMIT=3900
 CUT_MARKER=$'\n[cut - the full text is in the terminal]'
+
+# Cut <text> to TEXT_LIMIT bytes and name the cut. A slice can land inside a
+# multi-byte character, and Telegram refuses a body that is not valid UTF-8, so
+# a trailing partial sequence is dropped - together with the character it
+# belonged to, which costs a few bytes off an already truncated message and can
+# never leave an orphan byte behind.
+cut_to_limit() { # <text>
+  local LC_ALL=C s=$1
+  [ "${#s}" -gt "$TEXT_LIMIT" ] || { printf '%s' "$s"; return 0; }
+  s=${s:0:$TEXT_LIMIT}
+  while [ -n "$s" ]; do
+    case "$s" in
+      *[$'\x80'-$'\xbf']) s=${s%?} ;;
+      *) break ;;
+    esac
+  done
+  case "$s" in
+    *[$'\xc0'-$'\xff']) s=${s%?} ;;
+  esac
+  printf '%s%s' "$s" "$CUT_MARKER"
+}
 
 require_config() {
   fm_telegram_load_config || die "$FM_TELEGRAM_ERROR"
@@ -67,9 +94,7 @@ cmd_notify() {
     text="$*"
   fi
   [ -n "${text//[[:space:]]/}" ] || die "refusing to send an empty message"
-  if [ "${#text}" -gt "$TEXT_LIMIT" ]; then
-    text="${text:0:$((TEXT_LIMIT - ${#CUT_MARKER}))}$CUT_MARKER"
-  fi
+  text=$(cut_to_limit "$text")
 
   require_config
   # The recipient is read from the allowlist rather than named by the caller, so

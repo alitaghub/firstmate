@@ -52,8 +52,10 @@
 # judgment it applies to words typed at the terminal. Putting that judgment in a
 # poller would move merge and decision authority into a text-matching script.
 #
-# WHO may send is bin/fm-telegram-lib.sh's fm_telegram_update_verdict, and every
-# rejection is recorded on the result rather than silently dropped.
+# WHO may send is bin/fm-telegram-lib.sh's fm_telegram_update_verdict. A refused
+# update is counted in the ingest summary and its raw form stays in the capture
+# file. The refused sender is told only when he is already on the allowlist -
+# answering anyone else would confirm the bot exists to whoever probed it.
 #
 # Duplicate suppression. The offset is persisted only AFTER a note is safely on
 # disk, because the two crash orders are not equally bad: the other order
@@ -159,7 +161,7 @@ emit_result() { # <status> <offset> <count> <detail> [payload-file]
 }
 
 cmd_poll() {
-  local offset='' failures=0 response result count payload rc
+  local offset='' failures=0 response result count payload rc transient detail
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --offset) [ "$#" -ge 2 ] || die "--offset needs a nonnegative integer"; offset=$2; shift 2 ;;
@@ -181,32 +183,39 @@ cmd_poll() {
       return 0
     fi
     rc=0
+    transient=0
+    detail=
     response=$(fm_telegram_api getUpdates \
       --data-urlencode "offset=$offset" \
       --data-urlencode "timeout=$POLL_WINDOW" \
       --data-urlencode "limit=$POLL_LIMIT" \
       --data-urlencode 'allowed_updates=["message"]' 2>&1) || rc=$?
     if [ "$rc" -ne 0 ]; then
+      transient=1
+      detail=$(fm_telegram_redact "$response" | tr '\n' ' ')
+    elif ! result=$(fm_telegram_api_result "$response" 2>&1); then
+      detail=$(fm_telegram_redact "$result" | tr '\n' ' ')
+      fm_telegram_failure_is_transient "$response" && transient=1
+      if [ "$transient" -eq 0 ]; then
+        emit_result error "$offset" 0 "$detail"
+        return 0
+      fi
+    fi
+    if [ "$transient" -eq 1 ]; then
+      # Every failure that fixes itself waits here on the one counter and the
+      # one backoff: no route, a 429, a 5xx, an edge gateway page. Emitting on
+      # the first 429 instead would hand the registration straight back to the
+      # runner, which re-polls within seconds and extends the rate limit that
+      # asked us to wait.
       failures=$((failures + 1))
       if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-        # curl never got an answer at all: no DNS, no route, no reply. Like a
-        # 429, a 5xx, or an edge gateway page, that fixes itself, so it is NOT
-        # an `error` and must not disarm the channel over a wifi blip.
-        emit_result unreachable "$offset" 0 "$(fm_telegram_redact "$response" | tr '\n' ' ')"
+        emit_result unreachable "$offset" 0 "$detail"
         return 0
       fi
       sleep "$TRANSPORT_BACKOFF"
       continue
     fi
     failures=0
-    if ! result=$(fm_telegram_api_result "$response" 2>&1); then
-      if fm_telegram_failure_is_transient "$response"; then
-        emit_result unreachable "$offset" 0 "$(fm_telegram_redact "$result" | tr '\n' ' ')"
-      else
-        emit_result error "$offset" 0 "$(fm_telegram_redact "$result" | tr '\n' ' ')"
-      fi
-      return 0
-    fi
     count=$(printf '%s' "$result" | jq -r 'if type == "array" then length else "invalid" end' 2>/dev/null) || count=invalid
     case "$count" in
       invalid|''|*[!0-9]*) emit_result error "$offset" 0 "telegram returned a result that is not an update list"; return 0 ;;
@@ -279,6 +288,33 @@ queue_note() { # <text> -> prints the note id
   printf '%s\n' "$output" | sed -n 's/^queued //p' | head -n1
 }
 
+refusal_sentence() { # <reason>
+  case "$1" in
+    forwarded) printf 'That was a forwarded message, so I did not read it - the words are somebody else%ss. Retype it and I will pick it up.' "'" ;;
+    via-bot) printf 'That came through another bot, so I did not read it. Send it to me directly and I will pick it up.' ;;
+    no-text) printf 'That message had no text, so there was nothing for me to read.' ;;
+    *) printf 'I did not read that message (%s), so it is waiting on nothing.' "$1" ;;
+  esac
+}
+
+# Tell the captain his message was refused - and ONLY the captain. The reply
+# goes out only when message.from.id is already on the allowlist, because a bot
+# that answers an unknown sender confirms it exists and turns the check into a
+# probe amplifier. An update with no sender, or one nobody can parse, is not
+# allowlisted and gets total silence. The reply is always addressed to the
+# allowlisted chat `notify` resolves, never to the chat the refused message
+# arrived on, so a refusal in a group cannot make the bot post into that group.
+# Every failure is swallowed: a reply that cannot be sent must not stop ingest.
+tell_the_captain_it_was_refused() { # <update> <reason>
+  local update=$1 reason=$2 from_id
+  from_id=$(printf '%s' "$update" | jq -r '
+    if (.message.from.id | type) == "number" then (.message.from.id | tostring) else "" end' 2>/dev/null) || return 0
+  fm_telegram_id_allowed "$from_id" || return 0
+  refusal_sentence "$reason" | FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_TELEGRAM_TIMEOUT="${FM_TELEGRAM_TIMEOUT:-10}" \
+    "$SCRIPT_DIR/fm-telegram.sh" notify - >/dev/null 2>&1 || true
+}
+
 cmd_ingest() { # <result-file>
   local file=$1 class payload count i update verdict text update_id note_id
   local queued=0 skipped=0 rejected=0 highest=-1 offset
@@ -309,6 +345,7 @@ cmd_ingest() { # <result-file>
       # Named, counted, and never queued. A rejection is the channel working.
       printf 'rejected: update %s %s\n' "$update_id" "${verdict#reject:}"
       rejected=$((rejected + 1))
+      tell_the_captain_it_was_refused "$update" "${verdict#reject:}"
       continue
     fi
     if update_seen "$update_id"; then

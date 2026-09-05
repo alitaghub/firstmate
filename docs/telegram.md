@@ -174,6 +174,13 @@ If the machine is off for longer than that, messages older than a day are gone f
 They are cloud chats and Telegram's servers can read them.
 Use this channel for instructions and decisions, not for pasting secrets, credentials, or private code.
 
+## When a message is refused
+
+A refused message is never read and never becomes a note - that is the check working.
+If the sender is already on the allowlist, the bot replies with one sentence saying why, so a forward that was quietly dropped does not leave the captain waiting for an answer that is never coming.
+If the sender is *not* on the allowlist, nothing goes out at all: no reply, no connection. A bot that answers an unknown sender confirms to whoever probed it that it exists, which would turn the allowlist into a probe amplifier.
+The reply always goes to the allowlisted chat, never to the chat the refused message arrived on.
+
 ## An unlocked phone
 
 Stated plainly: anyone holding the captain's unlocked phone has his Telegram, and can send a message that passes every check above.

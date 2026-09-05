@@ -385,7 +385,7 @@ test_an_unreachable_network_keeps_the_channel_listening() {
   export FM_TELEGRAM_TEST_CALLS="$home/calls"
 
   FM_HOME="$home" PATH="$fakebin:$PATH" "$ADAPTER" arm >/dev/null || fail 'arming failed'
-  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 120 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 180 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
 
   assert_contains "$out" 'autohandled: telegram' \
     'an unreachable network was left for a handler instead of being absorbed'
@@ -398,9 +398,10 @@ test_an_unreachable_network_keeps_the_channel_listening() {
 }
 
 # fake_telegram_status <home> <http-status> <body> installs a curl that answers
-# the first call with that HTTP status and body - appending the status on its
-# own trailing line, as `curl -w` does for the real transport - and then idles
-# with an empty update list.
+# EVERY call with that HTTP status and body, appending the status on its own
+# trailing line as `curl -w` does for the real transport. A failure that keeps
+# standing is what a rate limit or an edge outage actually looks like, and it is
+# the only way to see whether the poll waits between attempts or hammers.
 fake_telegram_status() {
   local home=$1 status=$2 body=$3 fakebin
   fakebin=$(fm_fakebin "$home")
@@ -411,13 +412,8 @@ fake_telegram_status() {
 cat > /dev/null
 n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
 printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
-if [ "$n" = 0 ]; then
-  cat "$FM_TELEGRAM_TEST_FIRST"
-  printf '\n%s' "$(cat "$FM_TELEGRAM_TEST_STATUS")"
-else
-  sleep 1
-  printf '{"ok":true,"result":[]}\n200'
-fi
+cat "$FM_TELEGRAM_TEST_FIRST"
+printf '\n%s' "$(cat "$FM_TELEGRAM_TEST_STATUS")"
 SH
   chmod +x "$fakebin/curl"
   printf '%s\n' "$fakebin"
@@ -429,18 +425,23 @@ run_one_capture() {
   export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TEST_FIRST="$home/first-response.json" \
     FM_TELEGRAM_TEST_STATUS="$home/first-status"
   FM_HOME="$home" PATH="$fakebin:$PATH" "$ADAPTER" arm >/dev/null || fail 'arming failed'
-  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 60 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" timeout 180 "$ROOT/bin/fm-procevent.sh" start telegram 2>&1) || true
   unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TEST_FIRST FM_TELEGRAM_TEST_STATUS
   printf '%s\n' "$out"
 }
 
 assert_channel_kept_listening() {  # <home> <out> <what>
-  local home=$1 out=$2 what=$3
+  local home=$1 out=$2 what=$3 calls
   assert_contains "$out" 'autohandled: telegram' "a $what was left for a handler instead of being absorbed"
   assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" telegram \
     "the channel did not re-arm after a $what, so the next message would never arrive"
   [ -s "$home/state/.wake-queue" ] && fail "a $what woke firstmate"
   [ "$(note_count "$home")" = 0 ] || fail "a $what queued a note"
+  # Giving up after ONE attempt would hand the registration straight back to the
+  # runner, which re-polls within seconds - answering a rate limit with a
+  # request storm. The poll has to spend its own retries first.
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) on a $what instead of waiting and retrying"
 }
 
 test_a_rate_limit_keeps_the_channel_listening() {
@@ -511,13 +512,107 @@ test_an_over_limit_digest_is_cut_rather_than_dropped() {
     || fail "notify refused an over-limit digest instead of cutting it: $out"
   assert_contains "$out" 'sent to' 'the over-limit digest was not sent'
   sent=$(cat "$FM_TELEGRAM_TEST_SENT")
-  [ "${#sent}" -le 4096 ] || fail "notify sent ${#sent} characters, over Telegram's 4096 limit"
+  [ "$(wc -c < "$FM_TELEGRAM_TEST_SENT")" -le 4096 ] \
+    || fail "notify sent $(wc -c < "$FM_TELEGRAM_TEST_SENT") bytes, over Telegram's 4096 limit"
   assert_contains "$sent" 'the full text is in the terminal' \
     'the cut digest does not say it was cut'
   assert_contains "$sent" 'Supervisor escalate' \
     'the cut kept the tail instead of the front, losing the earliest items'
   unset FM_TELEGRAM_TEST_SENT
   pass 'a digest over the message limit is cut at the front and still delivered'
+}
+
+test_a_cut_never_splits_a_character() {
+  # The cut is a byte slice, and bash slices bytes under a C locale - which is
+  # what the daemon inherits when LANG is unset. Landing inside a multi-byte
+  # character produces an orphan byte, Telegram refuses a body that is not valid
+  # UTF-8, and the push the truncation exists to save is lost anyway.
+  local home fakebin long out
+  home=$(new_home)
+  fakebin=$(sending_curl "$home")
+  export FM_TELEGRAM_TEST_SENT="$home/sent.txt"
+  # A two-byte character repeated across the whole digest, so wherever the cut
+  # lands it lands inside one.
+  long="Supervisor escalate: $(awk 'BEGIN { for (i = 0; i < 3000; i++) printf "\303\251" }')"
+
+  out=$(printf '%s' "$long" | LC_ALL=C PATH="$fakebin:$PATH" FM_HOME="$home" "$CLI" notify - 2>&1) \
+    || fail "notify refused a multi-byte digest instead of cutting it: $out"
+  iconv -f UTF-8 -t UTF-8 < "$FM_TELEGRAM_TEST_SENT" > /dev/null 2>&1 \
+    || fail 'the cut split a character and sent invalid UTF-8, which Telegram refuses'
+  [ "$(wc -c < "$FM_TELEGRAM_TEST_SENT")" -le 4096 ] \
+    || fail "notify sent $(wc -c < "$FM_TELEGRAM_TEST_SENT") bytes, over Telegram's 4096 limit"
+  assert_contains "$(cat "$FM_TELEGRAM_TEST_SENT")" 'the full text is in the terminal' \
+    'the cut digest does not say it was cut'
+  unset FM_TELEGRAM_TEST_SENT
+  pass 'a cut lands on a character boundary, whatever the locale'
+}
+
+# --- telling the captain a message was refused ------------------------------
+
+# recording_curl <home> installs a curl that records every invocation's text
+# argument, one per line, and answers as the Bot API does on success.
+recording_curl() {
+  local home=$1 fakebin
+  fakebin=$(fm_fakebin "$home")
+  : > "$home/outbound.log"
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'call\n' >> "$FM_TELEGRAM_TEST_OUTBOUND"
+for _a in "$@"; do
+  case "$_a" in text=*) printf '%s\n' "${_a#text=}" >> "$FM_TELEGRAM_TEST_OUTBOUND" ;; esac
+done
+printf '{"ok":true,"result":{"message_id":1}}\n200'
+SH
+  chmod +x "$fakebin/curl"
+  printf '%s\n' "$fakebin"
+}
+
+test_a_refused_forward_from_the_captain_is_answered() {
+  # The intent expects him to try forwarding. Refusing in silence means he sees
+  # nothing, firstmate learns nothing, and the offset moves on - so he waits for
+  # a reply that is never coming.
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(recording_curl "$home")
+  export FM_TELEGRAM_TEST_OUTBOUND="$home/outbound.log"
+  out=$(PATH="$fakebin:$PATH" ingest "$home" "$(capture "$home" "$(jq -cn --argjson uid "$CAPTAIN_ID" '
+    [ { update_id: 700, message: {
+        message_id: 9, date: 1757000000,
+        from: { id: $uid, is_bot: false, first_name: "Cap" },
+        chat: { id: $uid, type: "private" },
+        forward_origin: { type: "user", date: 1756000000 },
+        text: "a colleague wrote this" } } ]')")")
+  assert_contains "$out" 'rejected: update 700 forwarded' 'the forward was not refused'
+  [ "$(note_count "$home")" = 0 ] || fail 'a forward became a note'
+  assert_grep 'forwarded message' "$FM_TELEGRAM_TEST_OUTBOUND" \
+    'the captain was never told his forward was refused'
+  assert_grep 'Retype it' "$FM_TELEGRAM_TEST_OUTBOUND" \
+    'the reply does not say what to do instead'
+  unset FM_TELEGRAM_TEST_OUTBOUND
+  pass 'a forward from the captain is refused and he is told why'
+}
+
+test_a_refused_stranger_gets_total_silence() {
+  # A bot that answers an unknown sender confirms it exists to whoever probed
+  # it. The check must not become a probe amplifier, so nothing goes out at all
+  # - not a reply, not a connection.
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(recording_curl "$home")
+  export FM_TELEGRAM_TEST_OUTBOUND="$home/outbound.log"
+  out=$(PATH="$fakebin:$PATH" ingest "$home" "$(capture "$home" "$(jq -cn --argjson sid "$STRANGER_ID" '
+    [ { update_id: 701, message: {
+        message_id: 3, date: 1757000000,
+        from: { id: $sid, is_bot: false, first_name: "Nobody" },
+        chat: { id: $sid, type: "private" },
+        text: "hello?" } } ]')")")
+  assert_contains "$out" 'rejected: update 701 sender-not-allowed' 'the stranger was not refused'
+  [ "$(note_count "$home")" = 0 ] || fail "a stranger's message became a note"
+  [ -s "$FM_TELEGRAM_TEST_OUTBOUND" ] \
+    && fail 'the bot answered a stranger, confirming to a prober that it exists'
+  unset FM_TELEGRAM_TEST_OUTBOUND
+  pass 'a stranger is refused in total silence, with no outbound call at all'
 }
 
 # --- the token --------------------------------------------------------------
@@ -611,5 +706,8 @@ test_a_rate_limit_keeps_the_channel_listening
 test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
 test_an_over_limit_digest_is_cut_rather_than_dropped
+test_a_cut_never_splits_a_character
+test_a_refused_forward_from_the_captain_is_answered
+test_a_refused_stranger_gets_total_silence
 test_the_token_is_never_printed
 test_the_token_never_reaches_a_command_line

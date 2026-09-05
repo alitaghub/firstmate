@@ -628,7 +628,7 @@ An accepted message becomes one captain inbox note and nothing else.
 It never merges, never answers a held captain decision, never spawns, and never runs anything from its own content.
 
 Reading is a registered process-event source armed with `bin/fm-procevent-telegram.sh arm`, so the blocking long poll never holds a conversational turn and the runner's one-owner-per-source rule keeps two homes sharing a store off the same bot token.
-The read position lives in `state/telegram.offset` and the queued-message receipts in `state/telegram.seen/`; both are removed by retiring the source only if the operator removes them deliberately, because they are what makes a replay after a crash silent.
+The read position lives in `state/telegram.offset` and the queued-message receipts in `state/telegram.seen/`. Retiring the source drops the registration and leaves both files exactly where they are, so a re-armed channel resumes from the position it left; only deleting them deliberately clears that, and keeping them is what makes a replay after a crash silent.
 Deleting either configuration file stops the poll within its current window, which is the fastest local kill switch.
 
 See [`telegram.md`](telegram.md) for setup, the security model, revocation, and what outbound may carry; each script's header and `--help` own the exact flags and mechanics.

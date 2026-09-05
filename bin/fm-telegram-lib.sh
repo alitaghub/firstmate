@@ -155,9 +155,10 @@ fm_telegram_redact() {
 # Call one Bot API method. The URL carries the token, so it is handed to curl
 # through a config file on stdin: an argument would be visible to every `ps` on
 # the machine. Method parameters are ordinary --data-urlencode arguments and
-# carry no secret. Prints the response body, records the HTTP status in
-# FM_TELEGRAM_HTTP_STATUS, and on failure prints the redacted curl diagnostic to
-# stderr and returns nonzero.
+# carry no secret. Prints the response body with its HTTP status appended on a
+# trailing line - read back by fm_telegram_response_status and stripped by
+# fm_telegram_response_body, so the status survives a command substitution. On
+# failure prints the redacted curl diagnostic to stderr and returns nonzero.
 fm_telegram_api() {
   local method=$1 err_file rc=0 raw err
   shift
