@@ -69,16 +69,6 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
-      # tests/fm-test-run.test.sh parses this workflow as YAML; PyYAML is the
-      # parser it uses and is not guaranteed by the runner image.
-      - name: Ensure a Python YAML parser
-        run: |
-          set -eu
-          if ! python3 -c 'import yaml' 2>/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y python3-yaml
-          fi
-          python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
       - name: Run portable parallel shard 1
         run: |
           set -eu

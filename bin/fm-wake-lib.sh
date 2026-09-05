@@ -35,13 +35,24 @@ _FM_UNAME=$(uname 2>/dev/null || echo unknown)
 # why tightening here is best effort: only an owner may chmod, and a directory
 # belonging to someone else is not this library's to repair or to reject.
 
-# Create each directory, and any missing parent, owner-only. An existing
-# directory is tightened rather than recreated. Returns non-zero if a directory
-# could not be created, matching the `mkdir -p` this replaces.
+# Create each directory owner-only. Only the directory named is private: any
+# missing parent is created on the operator's own umask, because the privacy
+# contract covers the state root and nothing above it. An existing directory is
+# tightened rather than recreated. Returns non-zero if a directory could not be
+# created, matching the `mkdir -p` this replaces.
 fm_private_dir_ensure() {  # <dir>...
-  local dir status=0
+  local dir parent status=0
   for dir in "$@"; do
     if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+      parent=${dir%/*}
+      case $parent in
+        "$dir") parent=. ;;
+        '') parent=/ ;;
+      esac
+      if [ ! -d "$parent" ] && ! mkdir -p "$parent"; then
+        status=1
+        continue
+      fi
       if ! (umask 077; mkdir -p "$dir"); then
         status=1
         continue
