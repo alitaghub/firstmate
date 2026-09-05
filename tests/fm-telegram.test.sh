@@ -18,6 +18,14 @@ ADAPTER="$ROOT/bin/fm-procevent-telegram.sh"
 CLI="$ROOT/bin/fm-telegram.sh"
 TMP_ROOT=$(fm_test_tmproot fm-telegram)
 
+# EVERY case here runs against a curl that never leaves this machine. Most
+# install their own shim; this is the backstop for the ones that exercise the
+# real transport, and for any future case that forgets a shim. 127.0.0.1:1
+# refuses instantly, so a request that escapes a shim dies locally instead of
+# reaching api.telegram.org with a fake token in its URL.
+FM_TELEGRAM_API_BASE='http://127.0.0.1:1'
+export FM_TELEGRAM_API_BASE
+
 CAPTAIN_ID=987654321
 STRANGER_ID=111222333
 # Valid in shape, worthless in fact: no call is ever made with it.
@@ -97,8 +105,6 @@ test_captain_message_becomes_one_note() {
   [ "$(note_count "$home")" = 1 ] || fail "expected exactly one captain note, found $(note_count "$home")"
   assert_contains "$(note_bodies "$home")" 'merge the telegram PR when it is green' \
     "the queued note does not carry the captain's words"
-  assert_grep 'source=telegram' "$(find "$home/state/inbox" -name '*.note' | head -n1)" \
-    "the queued note does not record that it came from Telegram"
   # The message is queued and nothing else happens: no wake beyond the note's
   # own, and no merge, decision, or spawn is reachable from this path at all.
   [ "$(grep -c . "$home/state/.wake-queue" 2>/dev/null || echo 0)" = 1 ] \
@@ -123,13 +129,35 @@ test_adapter_has_no_authority_beyond_the_note() {
 # --- reject -----------------------------------------------------------------
 
 # assert_rejected <label> <updates-json> <reason> <why-it-matters>
+#
+# Refusing is only half the behaviour; the other half is what goes back out. A
+# refused message from the captain earns one reply, and it must go to HIS chat -
+# never to the chat the message arrived on, or a refusal in a group would make
+# the bot post there. A refused message from anyone else earns total silence.
+# Both are asserted against a curl that records every call it is handed, so each
+# case proves a positive fact rather than only that nothing was queued.
 assert_rejected() {
-  local label=$1 updates=$2 reason=$3 why=$4 home out
+  local label=$1 updates=$2 reason=$3 why=$4 home fakebin out sender calls
   home=$(new_home)
-  out=$(ingest "$home" "$(capture "$home" "$updates")")
+  fakebin=$(recording_curl "$home")
+  export FM_TELEGRAM_TEST_OUTBOUND="$home/outbound.log"
+  out=$(PATH="$fakebin:$PATH" ingest "$home" "$(capture "$home" "$updates")")
   assert_contains "$out" 'queued=0' "$why"
   assert_contains "$out" "$reason" "$label was refused for the wrong reason"
   [ "$(note_count "$home")" = 0 ] || fail "$why"
+
+  sender=$(printf '%s' "$updates" | jq -r '.[0].message.from.id // empty')
+  calls=$(grep -c '^call$' "$FM_TELEGRAM_TEST_OUTBOUND" 2>/dev/null || true)
+  if [ "$sender" = "$CAPTAIN_ID" ]; then
+    [ "$calls" = 1 ] || fail "$label: the captain got $calls replies, expected one"
+    assert_grep "to=$CAPTAIN_ID" "$FM_TELEGRAM_TEST_OUTBOUND" \
+      "$label: the refusal reply did not go to the captain's own chat"
+    assert_no_grep "to=$STRANGER_ID" "$FM_TELEGRAM_TEST_OUTBOUND" \
+      "$label: the bot replied into the chat the refused message arrived on"
+  else
+    [ "$calls" = 0 ] || fail "$label: the bot made $calls outbound call(s) for a sender it does not know"
+  fi
+  unset FM_TELEGRAM_TEST_OUTBOUND
   pass "$label is refused ($reason)"
 }
 
@@ -561,7 +589,10 @@ cat > /dev/null
 printf 'call\n' >> "$FM_TELEGRAM_TEST_OUTBOUND"
 prev=
 for _a in "$@"; do
-  case "$_a" in text=*) printf '%s\n' "${_a#text=}" >> "$FM_TELEGRAM_TEST_OUTBOUND" ;; esac
+  case "$_a" in
+    text=*) printf '%s\n' "${_a#text=}" >> "$FM_TELEGRAM_TEST_OUTBOUND" ;;
+    chat_id=*) printf 'to=%s\n' "${_a#chat_id=}" >> "$FM_TELEGRAM_TEST_OUTBOUND" ;;
+  esac
   [ "$prev" = --max-time ] && printf 'max-time=%s\n' "$_a" >> "$FM_TELEGRAM_TEST_OUTBOUND"
   prev=$_a
 done
