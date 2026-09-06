@@ -720,6 +720,55 @@ test_a_window_that_can_never_advance_gives_up_visibly() {
   pass 'a window the poll can never advance past stops for good and raises a wake'
 }
 
+test_a_replayed_batch_stops_rather_than_spinning() {
+  # THE DEFECT IS THE REPETITION, again, and this time the window looks perfectly
+  # well formed: a caching proxy serves one cached body of stranger traffic for
+  # every request, whatever offset is asked for. Nothing here is ours, so the
+  # poll moves the read position past the batch - once. From the second fetch on,
+  # the batch's ids are all BEHIND the read position, so setting the offset from
+  # them sets it to the same value again. A poll that called that progress would
+  # reset its budget, skip its wait, and issue getUpdates as fast as the proxy
+  # answers, forever, capturing nothing and waking nobody.
+  local home out calls fakebin
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+cat > /dev/null
+n=\$(cat "\$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\\n' "\$((n + 1))" > "\$FM_TELEGRAM_TEST_CALLS"
+# A poll that neither waits nor counts here would run until the runner killed it,
+# so this stops answering well past the budget rather than hanging the suite.
+if [ "\$n" -ge 100 ]; then
+  printf 'curl: (6) Could not resolve host: api.telegram.org\\n' >&2
+  exit 6
+fi
+# The same cached body every time, with a real update_id the poll has already
+# read past after the first fetch.
+printf '{"ok":true,"result":[{"update_id":500,"message":{"message_id":1,"date":1757000000,"from":{"id":$STRANGER_ID,"is_bot":false,"first_name":"Nobody"},"chat":{"id":$STRANGER_ID,"type":"private"},"text":"hello?"}}]}'
+printf '\\n200'
+SH
+  chmod +x "$fakebin/curl"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  assert_contains "$out" 'not-autohandled' \
+    'a replayed batch was quietly marked handled, so the channel re-armed into the same spin'
+  assert_grep 'procevent telegram' "$home/state/.wake-queue" \
+    'a replayed batch raised no wake, so the channel would spin silently'
+  [ "$(note_count "$home")" = 0 ] || fail 'a batch of stranger traffic queued a note'
+
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'the channel re-armed after a replayed batch instead of stopping to ask' ;;
+  esac
+
+  # One fetch legitimately advances the offset past the batch; every fetch after
+  # it must count against the budget, so the poll stops within one call of it.
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) instead of advancing once and then waiting"
+  [ "$calls" -le 9 ] || fail "the poll made $calls attempts on one replayed batch - it is spinning rather than counting"
+  pass 'a batch replayed behind the read position stops for good and raises a wake'
+}
+
 test_an_idle_channel_never_reports_itself_unreachable() {
   # The guard on the fix above: the retry budget now resets on PROGRESS rather
   # than on a successful request. Resetting on the wrong condition is invisible
@@ -1196,6 +1245,7 @@ test_a_rate_limit_keeps_the_channel_listening
 test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
 test_a_window_that_can_never_advance_gives_up_visibly
+test_a_replayed_batch_stops_rather_than_spinning
 test_an_idle_channel_never_reports_itself_unreachable
 test_a_window_that_never_stays_open_keeps_the_channel_listening
 test_a_window_that_never_stays_open_waits_rather_than_hammers

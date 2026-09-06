@@ -34,11 +34,11 @@
 #            by hand next to a live runner cannot double-queue a note.
 # classify   Print the captured outcome class: updates, unreachable, error, or
 #            malformed. `unreachable` is a failure that fixes itself - no route,
-#            a 429, a 5xx, or a body that is not Bot API JSON - and re-arms;
-#            `error` is a channel nothing here can repair - Telegram refusing
-#            the call (401, 409), a removed token or allowlist, a window the
-#            poll can never advance past, or empty windows that keep coming back
-#            without holding the long poll open - and stops to ask.
+#            a 429, a 5xx, a body that is not Bot API JSON, or empty windows
+#            that keep coming back without holding the long poll open - and
+#            re-arms; `error` is a channel nothing here can repair - Telegram
+#            refusing the call (401, 409), a removed token or allowlist, or a
+#            window the poll can never advance past - and stops to ask.
 # terminal   Every capture ends its registration; handle re-arms the next one.
 # self-announcing
 #            Declares that a fully applied capture announces itself downstream:
@@ -308,6 +308,14 @@ cmd_poll() {
         # next one rather than capturing a result whose only content is that
         # nothing happened. It IS progress - the channel held our request for
         # the window and we are up to date - so the budget resets.
+        #
+        # This is the one branch that continues WITHOUT sleeping, and the
+        # `elapsed` check above is the only thing that makes that safe: the
+        # iteration already spent a real long-poll window, so it cannot repeat
+        # faster than the window itself. The duration check is load-bearing, not
+        # redundant - drop it and this arm becomes the instant-empty spin the
+        # arm below exists to stop. Do not add a sleep here instead; a genuine
+        # long poll has to stay responsive to the captain's next message.
         failures=0
         continue
       fi
@@ -340,30 +348,37 @@ cmd_poll() {
       # to disk, so a replay after a crash simply drops the same updates again.
       batch_high=$(printf '%s' "$result" | jq -r '
         [.[] | select((.update_id | type) == "number") | .update_id] | max // empty' 2>/dev/null) || batch_high=
+      advanced=0
       case "$batch_high" in
-        ''|*[!0-9]*)
-          # No id to advance past, so the next window is the same window.
-          # Inventing an offset here would confirm updates nobody read, so this
-          # waits instead, on the SAME counter and backoff as every other
-          # repeating failure. What it gives up INTO is `error`, not
-          # `unreachable`: a window that keeps coming back unusable does not fix
-          # itself, and `unreachable` re-arms and acknowledges silently, which
-          # would only move the loop from inside this process to across
-          # processes. `error` stops without re-arming and reaches firstmate,
-          # the same path a refused token or a second reader takes.
-          failures=$((failures + 1))
-          if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-            emit_result error "$offset" 0 "telegram returned a window this poll cannot advance past"
-            return 0
-          fi
-          sleep "$TRANSPORT_BACKOFF"
-          ;;
-        *)
-          # The offset moved, so the poll got somewhere.
-          offset=$((batch_high + 1))
-          failures=0
-          ;;
+        ''|*[!0-9]*) ;;
+        # An id at or above the read position is the only thing that moves it.
+        # A batch whose ids are all BELOW it - a cached body replayed for every
+        # request - would set the same offset again, so it is not progress and
+        # must not be treated as any.
+        *) [ "$batch_high" -ge "$offset" ] && advanced=1 ;;
       esac
+      if [ "$advanced" -eq 1 ]; then
+        offset=$((batch_high + 1))
+        failures=0
+      else
+        # Nothing to advance past: either the window carries no usable id, or it
+        # carries only ids the read position is already past, so the next
+        # getUpdates asks for this very same window. Inventing an offset here
+        # would confirm updates nobody read, so this waits instead, on the SAME
+        # counter and backoff as every other repeating failure. What it gives up
+        # INTO is `error`, not `unreachable`: a window that keeps coming back
+        # unusable does not fix itself, and `unreachable` re-arms and
+        # acknowledges silently, which would only move the loop from inside this
+        # process to across processes. `error` stops without re-arming and
+        # reaches firstmate, the same path a refused token or a second reader
+        # takes.
+        failures=$((failures + 1))
+        if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
+          emit_result error "$offset" 0 "telegram returned a window this poll cannot advance past"
+          return 0
+        fi
+        sleep "$TRANSPORT_BACKOFF"
+      fi
       continue
     fi
     printf '%s' "$kept" | jq -c '.' > "$payload" || { emit_result error "$offset" 0 "cannot stage captured updates"; return 0; }
