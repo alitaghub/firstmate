@@ -317,13 +317,12 @@ cmd_poll() {
       # request would issue them as fast as the answer arrives, which is the
       # request storm the rest of this poll works to avoid, so it waits and
       # counts on the SAME budget as every other repeating answer. It gives up
-      # into `error` for the same reason an unadvanceable window does: what
-      # keeps answering is not Telegram, `unreachable` re-arms silently, and
-      # that would only move the loop from inside this process to across
-      # processes.
+      # into `unreachable` because this is a failure of network POSITION, and
+      # those fix themselves: the same laptop on the captain's own wifi reaches
+      # Telegram again, so the channel has to be listening when it does.
       failures=$((failures + 1))
       if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-        emit_result error "$offset" 0 "telegram answered an empty window without holding the long poll open"
+        emit_result unreachable "$offset" 0 "telegram answered an empty window without holding the long poll open"
         return 0
       fi
       sleep "$TRANSPORT_BACKOFF"

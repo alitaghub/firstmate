@@ -760,13 +760,14 @@ SH
   pass 'a long quiet spell does not exhaust the retry budget and declare a healthy channel dead'
 }
 
-test_a_window_that_never_stays_open_gives_up_visibly() {
-  # The other half of the same contract, and again THE DEFECT IS THE REPETITION.
+test_a_window_that_never_stays_open_keeps_the_channel_listening() {
   # An empty window answered in milliseconds is not a long poll: something
-  # between here and Telegram is ignoring the timeout the request asks for. If
-  # this path neither waits nor counts, the poll issues getUpdates as fast as
-  # the answer comes back - hundreds per second, forever, on the captain's own
-  # machine and against the rate limit the rest of the poll works to outlast.
+  # between here and Telegram is ignoring the timeout the request asks for. That
+  # is a failure of network POSITION - a captive portal, a caching proxy - and
+  # it fixes itself the moment the machine is back on a network that reaches
+  # Telegram, so the channel has to still be listening when it does. What must
+  # NOT happen is the poll asking again as fast as the answer arrives, so it
+  # waits and counts on the same budget as every other repeating answer.
   local home out calls fakebin
   home=$(new_home)
   fakebin=$(fm_fakebin "$home")
@@ -791,30 +792,44 @@ SH
   chmod +x "$fakebin/curl"
   out=$(run_one_capture "$home" "$fakebin")
 
-  assert_contains "$out" 'not-autohandled' \
-    'a channel that never holds the window open was quietly marked handled, so it re-armed into the same loop'
-  assert_grep 'procevent telegram' "$home/state/.wake-queue" \
-    'a channel that never holds the window open raised no wake, so it would fail silently'
-  [ "$(note_count "$home")" = 0 ] || fail 'an instantly empty window queued a note'
+  assert_channel_kept_listening "$home" "$out" 'window that never stays open'
 
-  # And it STAYS stopped: a reconcile is the watcher's own restart path, so a
-  # source still registered here would be back in the same spin within seconds.
-  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
-    *telegram*) fail 'the channel re-armed instead of stopping to ask' ;;
-  esac
-  FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
-  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
-    *telegram*) fail 'a reconcile restarted the channel into the same instant-empty windows' ;;
-  esac
-
-  # The bound is the point. A branch that stopped counting would run until the
-  # runner killed it, and one that stopped sleeping would burn through the whole
-  # budget in milliseconds - so the count has to land inside the budget AND the
-  # poll has to have spent real time getting there.
+  # And it gave up ON THE BUDGET rather than polling until the runner killed it.
+  # The wall clock this cost is what the pacing sibling below pins; this bound
+  # only proves the counter still stops the poll.
   calls=$(cat "$home/calls" 2>/dev/null || echo 0)
-  [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) instead of waiting and retrying"
   [ "$calls" -le 8 ] || fail "the poll made $calls attempts on windows that never stay open - the budget is not bounding it"
-  pass 'empty windows that never hold the poll open stop for good and raise a wake'
+  pass 'empty windows that never hold the poll open keep the channel listening without hammering'
+}
+
+test_a_window_that_never_stays_open_waits_rather_than_hammers() {
+  # The pacing half, and the ONLY test that fails when the sleep alone is
+  # removed: the budget bound above is satisfied by eight instant calls just as
+  # well as by eight paced ones. Three seconds of backoff inside a seven-second
+  # run allows at most three calls; a poll that stopped sleeping would spend its
+  # whole eight-call budget inside the first millisecond.
+  local home fakebin calls
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+printf '{"ok":true,"result":[]}'
+printf '\n200'
+SH
+  chmod +x "$fakebin/curl"
+  export FM_TELEGRAM_TEST_CALLS="$home/calls" FM_TELEGRAM_TRANSPORT_BACKOFF=3
+
+  FM_HOME="$home" PATH="$fakebin:$PATH" timeout 7 "$ADAPTER" poll --offset 0 >/dev/null 2>&1 || true
+
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -le 3 ] \
+    || fail "the poll made $calls calls in 7s on windows that never stay open, so it is spinning rather than waiting"
+  [ "$calls" -ge 1 ] || fail 'the poll never called Telegram at all, so this proves nothing'
+  unset FM_TELEGRAM_TEST_CALLS FM_TELEGRAM_TRANSPORT_BACKOFF
+  pass 'an empty window that never stays open is waited on, not hammered'
 }
 
 test_a_quiet_spell_between_two_rate_limit_bursts_resets_the_budget() {
@@ -1182,7 +1197,8 @@ test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
 test_a_window_that_can_never_advance_gives_up_visibly
 test_an_idle_channel_never_reports_itself_unreachable
-test_a_window_that_never_stays_open_gives_up_visibly
+test_a_window_that_never_stays_open_keeps_the_channel_listening
+test_a_window_that_never_stays_open_waits_rather_than_hammers
 test_a_quiet_spell_between_two_rate_limit_bursts_resets_the_budget
 test_an_over_limit_digest_is_cut_rather_than_dropped
 test_a_cut_never_splits_a_character

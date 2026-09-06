@@ -183,14 +183,14 @@ So the channel chooses a possible duplicate over a possible loss, and then remov
 - no answer at all: no wifi, no DNS, a VPN restart, a laptop waking up;
 - `429 Too Many Requests`, which says in its own body how long to wait;
 - any `5xx`, which is Telegram's edge failing;
-- a body that is not Bot API JSON at all, which is an edge gateway page wearing the wrong clothes.
+- a body that is not Bot API JSON at all, which is an edge gateway page wearing the wrong clothes;
+- empty windows that never hold the long poll open: something answered `200 OK` with no updates in milliseconds instead of holding the request for the window, which is the same captive portal or caching proxy answering in Telegram's place. A real quiet chat holds the window open, so a genuinely idle channel is never mistaken for this one. The poll waits and retries on the same budget rather than asking again as fast as the answer arrives, and the machine that moves back onto a network that reaches Telegram finds the channel still listening.
 
 *Refused* - stops and raises a wake, because re-polling burns the same failure in a loop until somebody changes something:
 
 - `401 Unauthorized`: the token was rejected or revoked;
 - `409 Conflict`: a second reader is polling the same bot;
 - a window the poll can never advance past: something answered `200 OK` with updates that carry no `update_id`, so there is no read position to move to and the next request asks for the same window again. The poll waits and retries on the same budget as an outage first, but a window that keeps coming back unusable is a broken reader, not a passing one, so it stops rather than re-arming into the same loop forever.
-- empty windows that never hold the long poll open: something answered `200 OK` with no updates in milliseconds instead of holding the request for the window - a captive portal, a caching proxy, anything ignoring the `timeout` the request asks for. A real quiet chat holds the window open, so a genuinely idle channel is never mistaken for this one. Like the case above, the poll waits and retries on the same budget first, and stops only when the answer keeps coming back the same.
 
 **The one hard limit: Telegram keeps an unconfirmed message for 24 hours.**
 If the machine is off for longer than that, messages older than a day are gone from Telegram's side and cannot be recovered.
