@@ -76,7 +76,7 @@ That is an open question this record does not settle, not a conclusion it establ
 
 ## Per-shard memory is sensitive to the shard split
 
-Two one-worker runs whose trees differed by 129 bytes read `max_worker_rss_kib` as 8,089,496 and 8,492,816 KiB, a 394 MiB difference, because the byte change moved the largest-first assignment's boundary:
+Two one-worker runs whose canonical roots differed by 100 bytes in total read `max_worker_rss_kib` as 8,089,496 and 8,492,816 KiB, a 394 MiB difference, because the byte change moved the largest-first assignment's boundary:
 
 ```text
 shard_1_weight_bytes 5,381,392   shard_2_weight_bytes 5,381,313   max_worker_rss_kib 8,089,496

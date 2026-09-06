@@ -356,9 +356,12 @@ for path in "${ROOTS[@]}"; do
 done
 
 # Largest-first deterministic greedy assignment keeps the two stable shards
-# balanced without affecting replay order, so an opt-in second worker gets an
-# even split. Direct bytes are a stable portable proxy after the expensive
-# dynamic adapter source fan-out is cut.
+# balanced without affecting replay order. Balance is what bounds the single
+# resident worker's peak, because an uneven split would hand one process a
+# larger source graph, and that per-shard peak is what the memory guarantee
+# rests on. An opt-in second worker gets an even split for the same reason.
+# Direct bytes are a stable portable proxy after the expensive dynamic adapter
+# source fan-out is cut.
 WORKER_LOADS=(0 0)
 LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
 while IFS="$TAB" read -r weight index path; do
