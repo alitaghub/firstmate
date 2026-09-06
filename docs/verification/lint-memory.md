@@ -12,6 +12,10 @@ Exact task chronology, branch names, run identifiers, and delivery transcripts r
 The two arms were measured on 2026-09-06 on Linux 6.18.33.2-microsoft-standard-WSL2 with 22 cores and 51.0 GiB of RAM (`MemTotal` 53457028 kB), against the pinned ShellCheck 0.11.0 reported by the script itself.
 Both arms covered the full canonical set that CI lints: 359 roots and 10,762,805 direct bytes, split into two shards of 5,381,363 and 5,381,442 bytes.
 
+That byte fingerprint drifts by design, and will not match on a later reading.
+`bin/fm-lint.sh` and `tests/fm-lint.test.sh` are themselves canonical roots, so any commit that edits the lint or the test guarding the behavior described here changes the byte total, moves both shard weights, and can flip which shard is the larger.
+This is a permanent property of measuring a lint with the lint's own source in scope, not a stale number waiting to be corrected.
+
 Each arm ran the same lint definition, differing only in resident worker count:
 
 ```sh
@@ -82,6 +86,9 @@ shard_1_weight_bytes 5,381,363   shard_2_weight_bytes 5,381,442   max_worker_rss
 Per-shard memory depends on which source graphs land in the same process, not smoothly on the shard's byte weight, so a small change to the canonical set can move the peak by hundreds of MiB.
 Re-measure rather than interpolate when the canonical set grows.
 
+Sensitivity of roughly 400 MiB per small canonical-set change sits against a measured margin of about 6,965 MiB, so the two quantities are an order of magnitude apart.
+A few hundred bytes of the drift described above is therefore not a reason to re-measure; new roots or a materially larger set is.
+
 ## An earlier 36,714 MiB figure is not reproduced
 
 An earlier figure of 36,714 MiB for this lint is not reproduced by anything measured here.
@@ -95,4 +102,5 @@ The guarantee rests on the directly measured per-shard peak in the section above
 ## Refreshing this record
 
 Re-run both arms with the commands above and re-read the same telemetry fields, capturing `shellcheck_processes_start` and `shellcheck_processes_end` so a foreign ShellCheck cannot be mistaken for the arm's own.
-`bin/fm-lint.sh --list-files` under `GITHUB_ACTIONS=true` prints the canonical set the numbers cover, and `bin/fm-lint.sh --required-version` prints the ShellCheck pin they were measured against.
+`bin/fm-lint.sh --list-files` under `GITHUB_ACTIONS=true` prints the current canonical set, which is the set to measure against; expect its byte total and shard split to drift slightly from the fingerprint recorded above rather than to confirm it.
+`bin/fm-lint.sh --required-version` prints the ShellCheck pin the recorded numbers were measured against.
