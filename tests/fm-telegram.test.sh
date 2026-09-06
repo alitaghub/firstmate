@@ -767,6 +767,80 @@ SH
   pass 'an update with no update_id stops the channel even when the captain sent it'
 }
 
+test_a_mixed_window_advances_past_the_traffic_it_dropped() {
+  # The read position belongs to the WINDOW, not to the part worth capturing. A
+  # window mixing one message already read with newer traffic the allowlist
+  # drops used to stall on exactly that confusion: the poll saw a new id and let
+  # the window through, the capture carried only the already-read message, and
+  # the ingest had nothing to move the position with. It re-armed at the same
+  # place and was marked handled, so nobody was told. One stranger in the window
+  # was enough to turn a visible stop into silence.
+  local home out fakebin
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  mkdir -p "$home/state/telegram.seen"
+  printf '501\n' > "$home/state/telegram.offset"
+  printf 'note=cap-1\n' > "$home/state/telegram.seen/500"
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+cat > /dev/null
+n=\$(cat "\$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\\n' "\$((n + 1))" > "\$FM_TELEGRAM_TEST_CALLS"
+# Update 500 is the captain's and was read long ago; update 600 is a stranger's
+# and is dropped before anything is written. Only 600 can move the position.
+printf '{"ok":true,"result":[{"update_id":500,"message":{"message_id":9,"date":1757000000,"from":{"id":$CAPTAIN_ID,"is_bot":false,"first_name":"Cap"},"chat":{"id":$CAPTAIN_ID,"type":"private"},"text":"ship it"}},{"update_id":600,"message":{"message_id":10,"date":1757000001,"from":{"id":$STRANGER_ID,"is_bot":false,"first_name":"Nobody"},"chat":{"id":$STRANGER_ID,"type":"private"},"text":"hello?"}}]}'
+printf '\\n200'
+SH
+  chmod +x "$fakebin/curl"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  [ "$(cat "$home/state/telegram.offset")" = 601 ] \
+    || fail "the read position stopped at $(cat "$home/state/telegram.offset") instead of moving past the dropped update to 601"
+  assert_contains "$out" 'autohandled: telegram' \
+    'a window that moved the read position was left for a handler instead of being absorbed'
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" telegram \
+    'the channel did not re-arm after a window it advanced past, so the next message would never arrive'
+  [ -s "$home/state/.wake-queue" ] && fail 'a window the poll advanced past woke firstmate'
+  [ "$(note_count "$home")" = 0 ] || fail 'a message that was already read was queued a second time'
+  pass 'a window mixing a read message with dropped traffic advances past all of it'
+}
+
+test_a_run_of_stranger_windows_never_stops_the_channel() {
+  # The guard above must never be narrowed to the updates worth capturing, and
+  # this is the test that would catch it. The bot's link is public, so a run of
+  # windows carrying nothing but somebody else's traffic is ordinary. Each one
+  # moves the read position and costs nothing; a channel that counted them as
+  # failures instead would hand any stranger who found the bot a way to stop the
+  # captain's channel by messaging it enough times.
+  local home fakebin out
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+cat > /dev/null
+n=\$(cat "\$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\\n' "\$((n + 1))" > "\$FM_TELEGRAM_TEST_CALLS"
+# Ten stranger windows - more than the retry budget - and then the captain.
+if [ "\$n" -lt 10 ]; then
+  printf '{"ok":true,"result":[{"update_id":%s,"message":{"message_id":1,"date":1757000000,"from":{"id":$STRANGER_ID,"is_bot":false,"first_name":"Nobody"},"chat":{"id":$STRANGER_ID,"type":"private"},"text":"hello?"}}]}' "\$((600 + n))"
+  printf '\\n200'
+  exit 0
+fi
+printf '{"ok":true,"result":[{"update_id":700,"message":{"message_id":2,"date":1757000100,"from":{"id":$CAPTAIN_ID,"is_bot":false,"first_name":"Cap"},"chat":{"id":$CAPTAIN_ID,"type":"private"},"text":"still here"}}]}'
+printf '\\n200'
+SH
+  chmod +x "$fakebin/curl"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  assert_contains "$out" 'autohandled: telegram' 'a run of stranger windows produced no capture at all'
+  [ "$(note_count "$home")" = 1 ] || fail "the captain's message after a run of stranger windows was lost ($(note_count "$home") note(s))"
+  assert_contains "$(note_bodies "$home")" 'still here' \
+    "the message after a run of stranger windows did not reach the captain's notes"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" telegram \
+    'the channel stopped after a run of stranger windows instead of staying armed'
+  pass 'a run of windows carrying only stranger traffic never counts against the retry budget'
+}
+
 test_a_replayed_message_from_the_captain_stops_rather_than_spinning() {
   # The sibling the offset-moved guard used to miss. Its window is not stranger
   # traffic and not malformed: it is the captain's own message, already read,
@@ -1345,6 +1419,8 @@ test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
 test_a_window_that_can_never_advance_gives_up_visibly
 test_a_malformed_update_from_the_captain_stops_rather_than_spinning
+test_a_mixed_window_advances_past_the_traffic_it_dropped
+test_a_run_of_stranger_windows_never_stops_the_channel
 test_a_replayed_message_from_the_captain_stops_rather_than_spinning
 test_a_replayed_batch_stops_rather_than_spinning
 test_an_idle_channel_never_reports_itself_unreachable

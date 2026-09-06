@@ -193,15 +193,29 @@ update_sender_allowed() { # <update>
 
 # ---------------------------------------------------------------- poll
 
-emit_result() { # <status> <offset> <count> <detail> [payload-file]
+# `offset` is the read position this poll ASKED with; `window-high` is the
+# highest update_id the answered window carried, across the WHOLE window rather
+# than the part worth capturing.
+#
+# WHERE THE READ POSITION'S AUTHORITY LIVES: the window, not the kept subset. An
+# update the poll dropped was still consumed - it was read, judged, and refused -
+# so the position has to move past it, and the ingest advances from this field
+# rather than from the ids it happens to be handed. Narrowing it back to the kept
+# ids breaks two ways at once: a window whose only new ids belong to strangers
+# would look unadvanceable, so anyone who found this public bot could halt the
+# captain's channel by messaging it; and a window mixing one already-read message
+# with newer dropped traffic would re-arm at the same position forever, telling
+# nobody. Both are failures this field exists to prevent.
+emit_result() { # <status> <offset> <count> <detail> <window-high> [payload-file]
   printf 'telegram: %s\n' "$SOURCE_ID"
   printf 'status: %s\n' "$1"
   printf 'offset: %s\n' "$2"
   printf 'count: %s\n' "$3"
   printf 'detail: %s\n' "$4"
+  printf 'window-high: %s\n' "$5"
   printf '\n'
-  if [ -n "${5-}" ] && [ -f "$5" ]; then
-    cat "$5"
+  if [ -n "${6-}" ] && [ -f "$6" ]; then
+    cat "$6"
   else
     printf '[]\n'
   fi
@@ -273,7 +287,7 @@ cmd_poll() {
     # takes effect within one poll rather than only at the next arm. That is the
     # captain's fastest local kill switch and it has to actually stop the poll.
     if ! fm_telegram_load_config; then
-      emit_result error "$offset" 0 "$FM_TELEGRAM_ERROR"
+      emit_result error "$offset" 0 "$FM_TELEGRAM_ERROR" ""
       return 0
     fi
     rc=0
@@ -292,7 +306,7 @@ cmd_poll() {
       detail=$(fm_telegram_redact "$result" | tr '\n' ' ')
       fm_telegram_failure_is_transient "$response" && transient=1
       if [ "$transient" -eq 0 ]; then
-        emit_result error "$offset" 0 "$detail"
+        emit_result error "$offset" 0 "$detail" ""
         return 0
       fi
     fi
@@ -304,7 +318,7 @@ cmd_poll() {
       # asked us to wait.
       failures=$((failures + 1))
       if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-        emit_result unreachable "$offset" 0 "$detail"
+        emit_result unreachable "$offset" 0 "$detail" ""
         return 0
       fi
       sleep "$TRANSPORT_BACKOFF"
@@ -315,7 +329,7 @@ cmd_poll() {
     elapsed=$((SECONDS - window_started))
     count=$(printf '%s' "$result" | jq -r 'if type == "array" then length else "invalid" end' 2>/dev/null) || count=invalid
     case "$count" in
-      invalid|''|*[!0-9]*) emit_result error "$offset" 0 "telegram returned a result that is not an update list"; return 0 ;;
+      invalid|''|*[!0-9]*) emit_result error "$offset" 0 "telegram returned a result that is not an update list" ""; return 0 ;;
     esac
     if [ "$count" -eq 0 ]; then
       if [ "$elapsed" -ge "$IDLE_HELD_OPEN" ]; then
@@ -345,16 +359,16 @@ cmd_poll() {
       # Telegram again, so the channel has to be listening when it does.
       failures=$((failures + 1))
       if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-        emit_result unreachable "$offset" 0 "telegram answered an empty window without holding the long poll open"
+        emit_result unreachable "$offset" 0 "telegram answered an empty window without holding the long poll open" ""
         return 0
       fi
       sleep "$TRANSPORT_BACKOFF"
       continue
     fi
-    kept=$(keep_worth_capturing "$result") || { emit_result error "$offset" 0 "cannot read the captured updates"; return 0; }
+    kept=$(keep_worth_capturing "$result") || { emit_result error "$offset" 0 "cannot read the captured updates" ""; return 0; }
     kept_count=$(printf '%s' "$kept" | jq -r 'length' 2>/dev/null) || kept_count=invalid
     case "$kept_count" in
-      invalid|''|*[!0-9]*) emit_result error "$offset" 0 "cannot read the captured updates"; return 0 ;;
+      invalid|''|*[!0-9]*) emit_result error "$offset" 0 "cannot read the captured updates" ""; return 0 ;;
     esac
     # CAN THIS WINDOW MOVE THE READ POSITION? That is a property of the WINDOW,
     # so it is asked of the whole result and answered before anything is decided
@@ -389,7 +403,7 @@ cmd_poll() {
       # takes.
       failures=$((failures + 1))
       if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-        emit_result error "$offset" 0 "telegram returned a window this poll cannot advance past"
+        emit_result error "$offset" 0 "telegram returned a window this poll cannot advance past" ""
         return 0
       fi
       sleep "$TRANSPORT_BACKOFF"
@@ -404,8 +418,8 @@ cmd_poll() {
       failures=0
       continue
     fi
-    printf '%s' "$kept" | jq -c '.' > "$payload" || { emit_result error "$offset" 0 "cannot stage captured updates"; return 0; }
-    emit_result updates "$offset" "$kept_count" "$kept_count update(s) captured" "$payload"
+    printf '%s' "$kept" | jq -c '.' > "$payload" || { emit_result error "$offset" 0 "cannot stage captured updates" ""; return 0; }
+    emit_result updates "$offset" "$kept_count" "$kept_count update(s) captured" "$batch_high" "$payload"
     return 0
   done
 }
@@ -496,7 +510,7 @@ tell_the_captain_it_was_refused() { # <update> <reason> -> 0 when a reply was se
 
 cmd_ingest() { # <result-file>
   local file=$1 class payload count i update verdict text update_id note_id
-  local queued=0 skipped=0 rejected=0 highest=-1 offset polled
+  local queued=0 skipped=0 rejected=0 highest=-1 offset polled window_high
   class=$(classify_result "$file")
   case "$class" in
     malformed) die "Telegram result is malformed" ;;
@@ -555,14 +569,21 @@ cmd_ingest() { # <result-file>
     queued=$((queued + 1))
   done
 
+  # WHO OWNS MOVING THE READ POSITION, second half. The poll owns refusing a
+  # window that cannot move it; this side owns writing the move down. It moves
+  # past the WHOLE window the poll answered - `window-high` - not merely past
+  # the ids this loop was handed, because an update the poll dropped was still
+  # consumed and asking for it again would fetch the same window forever. The
+  # kept ids still count, so a capture written before this field existed, or one
+  # ingested by hand, still advances by what it carries.
+  window_high=$(result_header_field "$file" window-high 2>/dev/null) || window_high=
+  case "$window_high" in ''|*[!0-9]*) ;; *) [ "$window_high" -le "$highest" ] || highest=$window_high ;; esac
   if [ "$highest" -ge 0 ]; then
     offset=$((highest + 1))
-    # WHO OWNS MOVING THE READ POSITION, second half. The poll owns refusing a
-    # window that cannot move it; this side owns moving it past everything the
-    # capture carried, refused updates included. What neither owns is moving it
-    # BACKWARDS or standing still: a capture whose ids are all at or below the
-    # offset the poll asked with says nothing new, and rewriting that offset
-    # would confirm the same window for the next poll to fetch again.
+    # What neither side owns is moving the position BACKWARDS or standing still:
+    # a capture whose ids are all at or below the offset the poll asked with says
+    # nothing new, and rewriting that offset would confirm the same window for
+    # the next poll to fetch again.
     polled=$(result_header_field "$file" offset 2>/dev/null) || polled=
     case "$polled" in ''|*[!0-9]*) polled=0 ;; esac
     if [ "$offset" -gt "$polled" ]; then

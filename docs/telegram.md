@@ -190,7 +190,7 @@ So the channel chooses a possible duplicate over a possible loss, and then remov
 
 - `401 Unauthorized`: the token was rejected or revoked;
 - `409 Conflict`: a second reader is polling the same bot;
-- a window the poll can never advance past: something answered `200 OK` with updates that carry no usable `update_id`, or with updates whose ids the read position has already moved past, so either way there is nothing to move the read position to and the next request asks for the same window again. The poll waits and retries on the same budget as an outage first, but a window that keeps coming back unusable is a broken reader, not a passing one, so it stops rather than re-arming into the same loop forever.
+- a window the poll can never advance past: something answered `200 OK` with a window carrying no usable `update_id` at all, or one whose every id the read position has already moved past, so there is nothing to move the read position to and the next request asks for the same window again. The read position moves past the whole window, refused and dropped updates included, so an ordinary window of somebody else's traffic advances it as normally as one of the captain's own - only a window with nothing new in it anywhere reaches this. The poll waits and retries on the same budget as an outage first, but a window that keeps coming back unusable is a broken reader, not a passing one, so it stops rather than re-arming into the same loop forever.
 
 **The one hard limit: Telegram keeps an unconfirmed message for 24 hours.**
 If the machine is off for longer than that, messages older than a day are gone from Telegram's side and cannot be recovered.
