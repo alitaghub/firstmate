@@ -848,56 +848,47 @@ SH
 }
 
 test_default_keeps_one_shellcheck_resident() {
-  local tmp fakebin big small live events telemetry padding out rc observed
+  local tmp fakebin first second events telemetry out rc observed
   tmp=$(fm_test_tmproot fm-lint-residency)
   mkdir -p "$tmp"
   fakebin=$(fm_fakebin "$tmp")
-  big="$tmp/big.sh"
-  small="$tmp/small.sh"
-  live="$tmp/live"
+  first="$tmp/first.sh"
+  second="$tmp/second.sh"
   events="$tmp/events"
   telemetry="$tmp/telemetry.tsv"
-  mkdir -p "$live"
   : > "$events"
-  # Two roots of different sizes so the largest-first assignment fills both
-  # shards, which is what makes an overlapping second worker observable. Only
-  # the byte weight matters here, so the larger root is padded with a comment.
-  padding=$(printf '%400s' '' | tr ' ' x)
-  printf '#!/usr/bin/env bash\nprintf ok\n# %s\n' "$padding" > "$big"
-  printf '#!/usr/bin/env bash\nprintf ok\n' > "$small"
+  # Two roots put one root on each shard, so both shards have work and a second
+  # worker is something the probe can observe.
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$first"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$second"
   # Each invocation brackets itself with a start and end line, so an overlap is
   # an interleaving in the log rather than something a timing window has to
-  # catch. The first invocation holds its window open on a bounded poll that
-  # breaks the moment a sibling appears, so no fixed sleep has to outlast a
-  # loaded runner's whole spawn chain; a later invocation needs no window,
-  # because an overlapping sibling would already be recorded by then.
+  # catch. The first invocation holds its window open until a sibling's start
+  # line appears, bounded so a serial default cannot hang; a later invocation
+  # needs no window, because an overlapping sibling is already recorded by then.
   cat > "$fakebin/shellcheck" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
   printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
   exit 0
 fi
-# The start line lands before the presence file, so a sibling that counts this
-# process is guaranteed to have its own start line already recorded.
 printf 'start %s\n' "$$" >> "$FM_TEST_EVENT_LOG"
-: > "$FM_TEST_LIVE_DIR/$$"
 if [ "$(grep -c '^start ' "$FM_TEST_EVENT_LOG")" -eq 1 ]; then
   i=0
-  while [ "$i" -lt 500 ]; do
-    [ "$(find "$FM_TEST_LIVE_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l)" -lt 2 ] || break
-    sleep 0.01
+  while [ "$i" -lt 100 ]; do
+    [ "$(grep -c '^start ' "$FM_TEST_EVENT_LOG")" -lt 2 ] || break
+    sleep 0.05
     i=$((i + 1))
   done
 fi
 printf 'end %s\n' "$$" >> "$FM_TEST_EVENT_LOG"
-rm -f "$FM_TEST_LIVE_DIR/$$"
 SH
   chmod +x "$fakebin/shellcheck"
 
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_EVENT_LOG="$events" \
+  out=$(PATH="$fakebin:$PATH" FM_TEST_EVENT_LOG="$events" \
     FM_LINT_TELEMETRY="$telemetry" \
-    "$LINT" "$big" "$small" 2>&1) || rc=$?
+    "$LINT" "$first" "$second" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "default-worker lint failed: $out"
   [ "$(grep -c '^start ' "$events")" -eq 2 ] \
     || fail "the default did not run both shards: $(tr '\n' ' ' < "$events")"
@@ -910,9 +901,9 @@ SH
   # pass vacuously through a probe that could never observe a sibling.
   : > "$events"
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_EVENT_LOG="$events" \
+  out=$(PATH="$fakebin:$PATH" FM_TEST_EVENT_LOG="$events" \
     FM_LINT_JOBS=2 \
-    "$LINT" "$big" "$small" 2>&1) || rc=$?
+    "$LINT" "$first" "$second" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "opt-in concurrent lint failed: $out"
   observed=$(awk '{print $1}' "$events" | paste -sd, -)
   [ "$observed" = "start,start,end,end" ] \

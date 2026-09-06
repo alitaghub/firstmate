@@ -2,7 +2,8 @@
 
 Audience: maintainer verification.
 
-This record supports the active guarantee behind `bin/fm-lint.sh`'s one-resident-worker default: a single full-analysis ShellCheck worker over one logical shard fits a GitHub hosted runner's memory, while two concurrent workers do not reliably fit.
+This record supports the active guarantee behind `bin/fm-lint.sh`'s one-resident-worker default: a single full-analysis ShellCheck worker over one logical shard fits a GitHub hosted runner's memory with a measured margin.
+It also records what the two-worker arm did and did not show, because the measured two-worker peak does not on its own explain the kills that motivated the default.
 [`bin/fm-lint.sh`](../../bin/fm-lint.sh)'s header and `--help` own the current lint definition, the worker-count default, and the `FM_LINT_JOBS` override.
 Exact task chronology, branch names, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -30,6 +31,10 @@ if ($l =~ /^VmHWM:\s+(\d+)/) { $max_hwm = $1 if $1 > $max_hwm; }
 
 The script's own `--telemetry` snapshot supplied `max_worker_rss_kib`, each worker's own maximum resident set as measured by `/usr/bin/time`, and `worker_rss_sum_kib`, the arithmetic sum of those per-worker maxima.
 
+One limit of the sampler is worth recording, because it bounds how far the two-worker numbers can be trusted.
+The sampler matched processes by name alone, so any ShellCheck belonging to something other than the arm under measurement would have been added to the same sum.
+The script emits `shellcheck_processes_start` and `shellcheck_processes_end` to detect exactly that, and those two fields were not captured for these arms.
+
 ## Results
 
 | measure | two workers | one worker |
@@ -49,11 +54,21 @@ Three independent runs on this host read `max_worker_rss_kib` as 8,491,060, 8,49
 Taking the worst of those, one resident worker peaks at 8,294 MiB against a GitHub hosted runner's 16 GB, which is 15,259 MiB, so the guarantee holds with about 46% of the runner's memory unused.
 Both one-worker arms independently confirmed a maximum of exactly one resident ShellCheck process, so the default's residency behavior is measured rather than inferred from the wait pattern.
 
-## The two-worker peak is a range, not a point
+## What the two-worker arm shows, and what it does not
 
-Two runs of the two-worker arm sampled a combined peak of 15,685 MiB and 14,193 MiB, a 9.5% spread, while `worker_rss_sum_kib` agreed between them to 0.01% (16,058,780 and 16,061,036 KiB).
-Both workers therefore reached the same individual peaks in both runs and simply did not reach them at the same instant in the second, so the combined peak is 14,193-15,685 MiB depending on how the two workers' peaks align in time.
-Against a runner's 15,259 MiB, that range is reliably at or over the limit rather than deterministically over it, which is why the two-worker default is unsafe without being certain to fail on any single run.
+Exactly one instantaneous combined peak was sampled for the two-worker arm: 14,533,256 KiB, or 14,193 MiB.
+That is about 1,066 MiB below the 15,259 MiB a nominal 16 GB runner offers, so nominal runner capacity does not explain why the job was killed.
+Two two-worker runs were made, and their `worker_rss_sum_kib` readings agree to 0.01% (16,058,780 and 16,061,036 KiB), so both workers reached the same individual peaks in both runs; only one of the two runs has a sampled instantaneous peak.
+
+A figure of 15,685 MiB also circulates for this arm.
+It is `worker_rss_sum_kib` (16,061,036 KiB), the arithmetic sum of the two workers' separate maxima, and it is **not** a measurement of simultaneous residency: no measurement here shows both workers holding their own peak at the same instant.
+Do not compare it against a runner's memory.
+
+The evidence that the two-worker default is unsafe is behavioral rather than a measured peak over the limit: the canonical lint job died twice at its memory peak and emitted zero diagnostics.
+
+A runner's true available memory - what is left after the OS, the preinstalled toolchain, and the job's own processes - was not measured.
+It is lower than nominal, and it is the plausible remaining explanation for a 14,193 MiB peak being fatal there.
+That is an open question this record does not settle, not a conclusion it establishes.
 
 ## Per-shard memory is sensitive to the shard split
 
@@ -67,13 +82,17 @@ shard_1_weight_bytes 5,381,363   shard_2_weight_bytes 5,381,442   max_worker_rss
 Per-shard memory depends on which source graphs land in the same process, not smoothly on the shard's byte weight, so a small change to the canonical set can move the peak by hundreds of MiB.
 Re-measure rather than interpolate when the canonical set grows.
 
-## Reconciling an earlier 36,714 MiB figure
+## An earlier 36,714 MiB figure is not reproduced
 
-An earlier figure of 36,714 MiB for this lint does not describe a simultaneous peak and must not be halved to derive a per-shard one.
-`worker_rss_sum_kib` adds the maxima of workers that need never coexist, and the one-worker arms demonstrate that accounting directly: with a maximum of one resident process, whose sampled peak was 8,493,580 KiB, the same field still reported 16,167,708 KiB.
-Only the sampled instantaneous sum and `max_worker_rss_kib` describe memory that is actually resident at one time.
+An earlier figure of 36,714 MiB for this lint is not reproduced by anything measured here.
+It is 2.34 times the measured 15,685 MiB sum of per-worker maxima, so summing maxima - the one accounting that inflates a figure well past actual residency - cannot produce it either.
+That accounting is real and worth knowing: the one-worker arms show a maximum of one resident process, whose sampled peak was 8,493,580 KiB, while `worker_rss_sum_kib` for the same arm still reported 16,167,708 KiB.
+It just does not reach 36,714 MiB from these numbers, and the older figure's provenance is unknown.
+
+Nothing in the one-worker guarantee depends on resolving it.
+The guarantee rests on the directly measured per-shard peak in the section above, and only the sampled instantaneous sum and `max_worker_rss_kib` describe memory that is actually resident at one time.
 
 ## Refreshing this record
 
-Re-run both arms with the commands above and re-read the same telemetry fields.
+Re-run both arms with the commands above and re-read the same telemetry fields, capturing `shellcheck_processes_start` and `shellcheck_processes_end` so a foreign ShellCheck cannot be mistaken for the arm's own.
 `bin/fm-lint.sh --list-files` under `GITHUB_ACTIONS=true` prints the canonical set the numbers cover, and `bin/fm-lint.sh --required-version` prints the ShellCheck pin they were measured against.
