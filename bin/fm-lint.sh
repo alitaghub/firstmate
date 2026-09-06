@@ -27,10 +27,17 @@
 # Explicit paths always bypass this file-set selection and lint exactly the
 # given paths, matching the same config, without the workflow YAML check.
 #
-# Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# Canonical lint splits its roots over two stable logical shards and runs one
+# bounded worker at a time. Each shard writes separate diagnostics, and the
+# parent replays those outputs in deterministic shard and root order after every
+# worker finishes. One resident worker is the default because a full-analysis
+# ShellCheck holds its whole source graph in memory: two concurrent workers hold
+# two graphs at once, and their measured combined peak outgrew a GitHub hosted
+# runner, where the lint job died mid-run with no diagnostics at all.
+# FM_LINT_JOBS=2 buys wall time back on a host with memory to spare, with
+# byte-identical diagnostics and exit selection. Sharding itself is
+# unconditional, so the file set, severities, source following, and extended
+# analysis never depend on the worker count.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -39,7 +46,7 @@
 #   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
-#   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
+#   fm-lint.sh --jobs <1|2> [path]...  override the worker count (default 1)
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -122,7 +129,7 @@ fm_lint_run_workflows() {
   "$SELF_DIR/fm-lint-workflows.sh"
 }
 
-JOBS=${FM_LINT_JOBS:-2}
+JOBS=${FM_LINT_JOBS:-1}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
 ANALYSIS_MODE=full

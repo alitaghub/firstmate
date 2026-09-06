@@ -847,6 +847,63 @@ SH
   pass "jobs=1 and jobs=2 preserve deterministic diagnostics, failures, cleanup bounds, and quiet telemetry"
 }
 
+test_default_keeps_one_shellcheck_resident() {
+  local tmp fakebin big small live peaks telemetry padding out rc max
+  tmp=$(fm_test_tmproot fm-lint-residency)
+  mkdir -p "$tmp"
+  fakebin=$(fm_fakebin "$tmp")
+  big="$tmp/big.sh"
+  small="$tmp/small.sh"
+  live="$tmp/live"
+  peaks="$tmp/peaks"
+  telemetry="$tmp/telemetry.tsv"
+  mkdir -p "$live"
+  : > "$peaks"
+  # Two roots of different sizes so the largest-first assignment fills both
+  # shards, which is what makes an overlapping second worker observable. Only
+  # the byte weight matters here, so the larger root is padded with a comment.
+  padding=$(printf '%400s' '' | tr ' ' x)
+  printf '#!/usr/bin/env bash\nprintf ok\n# %s\n' "$padding" > "$big"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$small"
+  # Each invocation holds a presence file for a window wide enough to see a
+  # concurrent sibling, then records how many were resident alongside it.
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+: > "$FM_TEST_LIVE_DIR/$$"
+sleep 0.5
+find "$FM_TEST_LIVE_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l >> "$FM_TEST_PEAK_LOG"
+rm -f "$FM_TEST_LIVE_DIR/$$"
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_PEAK_LOG="$peaks" \
+    FM_LINT_TELEMETRY="$telemetry" "$LINT" "$big" "$small" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "default-worker lint failed: $out"
+  [ "$(wc -l < "$peaks" | tr -d '[:space:]')" -eq 2 ] \
+    || fail "the default did not run both shards: $(tr '\n' ' ' < "$peaks")"
+  max=$(LC_ALL=C sort -n "$peaks" | tail -1 | tr -d '[:space:]')
+  [ "$max" -eq 1 ] \
+    || fail "the default left $max ShellCheck processes resident at once; one graph at a time is what fits CI memory"
+  assert_grep $'jobs\t1' "$telemetry" "the default worker count is no longer serial"
+
+  # Prove the residency probe can see an overlap, so the assertion above cannot
+  # pass vacuously through a probe that never observes a sibling.
+  : > "$peaks"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_PEAK_LOG="$peaks" \
+    FM_LINT_JOBS=2 "$LINT" "$big" "$small" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "opt-in concurrent lint failed: $out"
+  max=$(LC_ALL=C sort -n "$peaks" | tail -1 | tr -d '[:space:]')
+  [ "$max" -eq 2 ] \
+    || fail "the residency probe never observed the opt-in concurrent worker"
+  pass "the default keeps one ShellCheck resident while jobs=2 stays an opt-in"
+}
+
 test_worker_trees_stop_on_signal() {
   local tmp fakebin fixture jobs telemetry lint_tmp pid_file out_file telemetry_file
   local parent_pid shellcheck_pid i parent_rc survivor
@@ -1013,6 +1070,7 @@ test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
+test_default_keeps_one_shellcheck_resident
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
