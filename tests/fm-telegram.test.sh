@@ -720,6 +720,53 @@ test_a_window_that_can_never_advance_gives_up_visibly() {
   pass 'a window the poll can never advance past stops for good and raises a wake'
 }
 
+test_a_malformed_update_from_the_captain_stops_rather_than_spinning() {
+  # The sibling of the unadvanceable window, and the one that used to slip past
+  # its guard: the SAME broken responder, but its update keeps a `from` object
+  # carrying the captain's own allowlisted id. That id used to be enough to keep
+  # the update, so the poll captured a window it could not advance past, the
+  # ingest refused the update before recording any id, the read position never
+  # moved, and the runner re-armed and marked the capture handled - which
+  # suppresses the wake. The channel read nothing and told nobody, on every
+  # runner cycle, forever. An id is what the read position moves to, so an
+  # update without one is unusable whoever sent it.
+  local home out calls fakebin
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+cat > /dev/null
+n=\$(cat "\$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\\n' "\$((n + 1))" > "\$FM_TELEGRAM_TEST_CALLS"
+# The same body every time, with no update_id and an allowlisted sender.
+printf '{"ok":true,"result":[{"message":{"message_id":1,"date":1757000000,"from":{"id":$CAPTAIN_ID,"is_bot":false,"first_name":"Cap"},"chat":{"id":$CAPTAIN_ID,"type":"private"},"text":"x"}}]}'
+printf '\\n200'
+SH
+  chmod +x "$fakebin/curl"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  assert_contains "$out" 'not-autohandled' \
+    'a malformed update from the captain was quietly marked handled, so the channel re-armed into the same window'
+  assert_grep 'procevent telegram' "$home/state/.wake-queue" \
+    'a malformed update from the captain raised no wake, so the channel would spin silently'
+  [ "$(note_count "$home")" = 0 ] || fail 'an update with no update_id queued a note'
+
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'the channel re-armed after a malformed update instead of stopping to ask' ;;
+  esac
+  FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'a reconcile restarted the channel on a window it can never advance past' ;;
+  esac
+
+  # It spent the shared budget getting there rather than giving up on the first
+  # answer or polling until the runner killed it.
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) instead of waiting and retrying"
+  [ "$calls" -le 8 ] || fail "the poll made $calls attempts on a malformed update - the budget is not bounding it"
+  pass 'an update with no update_id stops the channel even when the captain sent it'
+}
+
 test_a_replayed_batch_stops_rather_than_spinning() {
   # THE DEFECT IS THE REPETITION, again, and this time the window looks perfectly
   # well formed: a caching proxy serves one cached body of stranger traffic for
@@ -1245,6 +1292,7 @@ test_a_rate_limit_keeps_the_channel_listening
 test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
 test_a_window_that_can_never_advance_gives_up_visibly
+test_a_malformed_update_from_the_captain_stops_rather_than_spinning
 test_a_replayed_batch_stops_rather_than_spinning
 test_an_idle_channel_never_reports_itself_unreachable
 test_a_window_that_never_stays_open_keeps_the_channel_listening

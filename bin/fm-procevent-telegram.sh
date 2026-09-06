@@ -212,6 +212,18 @@ emit_result() { # <status> <offset> <count> <detail> [payload-file]
 # anything: the bot's link opens for anybody, so a stranger's message must cost
 # no file at all. A refusal for the message's SHAPE from the captain himself is
 # legitimate traffic and stays, because he is owed the reply that says why.
+#
+# WHO MOVES THE READ POSITION PAST AN UPDATE. Whatever survives here is the
+# ingest's to advance past: it records every captured update's id BEFORE it
+# judges the update, so a refusal moves the offset exactly as a queued note
+# does. Whatever is dropped here is the POLL's to advance past, from the batch's
+# own ids. An update carrying no numeric update_id belongs to neither - there is
+# no id for the ingest to record and none for it to be advanced past - so it is
+# dropped whoever sent it, allowlist or not. That hands the batch to the poll's
+# unadvanceable arm, which moves past whatever real ids the batch does carry and
+# otherwise stops visibly on the shared budget. Keeping it because the sender is
+# allowlisted is what let a window with no ids sit re-arming at an unchanged
+# offset forever, capturing on every runner cycle and waking nobody.
 keep_worth_capturing() { # <updates-json> -> the surviving updates as a JSON array
   local updates=$1 total i update verdict kept=
   total=$(printf '%s' "$updates" | jq -r 'length') || return 1
@@ -220,6 +232,9 @@ keep_worth_capturing() { # <updates-json> -> the surviving updates as a JSON arr
     update=$(printf '%s' "$updates" | jq -c ".[$i]") || return 1
     i=$((i + 1))
     verdict=$(fm_telegram_update_verdict "$update")
+    case "$verdict" in
+      reject:not-an-update|reject:bad-update-id) continue ;;
+    esac
     if [ "$verdict" != accept ] && ! update_sender_allowed "$update"; then
       continue
     fi
@@ -231,7 +246,7 @@ keep_worth_capturing() { # <updates-json> -> the surviving updates as a JSON arr
 
 cmd_poll() {
   local offset='' failures=0 response result count payload rc transient detail
-  local kept kept_count batch_high window_started elapsed
+  local kept kept_count batch_high window_started elapsed advanced
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --offset) [ "$#" -ge 2 ] || die "--offset needs a nonnegative integer"; offset=$2; shift 2 ;;
@@ -494,6 +509,13 @@ cmd_ingest() { # <result-file>
     i=$((i + 1))
     update_id=$(printf '%s' "$update" | jq -r 'if (.update_id | type) == "number" then (.update_id | tostring) else "" end' 2>/dev/null) || update_id=
     case "$update_id" in ''|*[!0-9]*) rejected=$((rejected + 1)); continue ;; esac
+    # The id is recorded BEFORE the verdict, deliberately: every update that
+    # reaches this loop is one the ingest owns advancing past, and an update it
+    # refuses is just as read as one it queues. Judging first and recording only
+    # on the accepting paths would leave a window of pure refusals at the same
+    # offset for the next poll to fetch again. What this loop cannot own is an
+    # update with no id at all - keep_worth_capturing drops those so the poll
+    # advances past the batch instead.
     [ "$update_id" -le "$highest" ] || highest=$update_id
 
     verdict=$(fm_telegram_update_verdict "$update")
