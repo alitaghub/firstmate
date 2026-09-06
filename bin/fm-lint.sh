@@ -31,13 +31,14 @@
 # bounded worker at a time. Each shard writes separate diagnostics, and the
 # parent replays those outputs in deterministic shard and root order after every
 # worker finishes. One resident worker is the default because a full-analysis
-# ShellCheck holds its whole source graph in memory: two concurrent workers hold
-# two graphs at once, and their measured combined peak outgrew a GitHub hosted
-# runner, where the lint job died mid-run with no diagnostics at all.
-# FM_LINT_JOBS=2 buys wall time back on a host with memory to spare, with
-# byte-identical diagnostics and exit selection. Sharding itself is
-# unconditional, so the file set, severities, source following, and extended
-# analysis never depend on the worker count.
+# ShellCheck holds its whole source graph in memory, so two concurrent workers
+# hold two graphs at once and their combined peak lands at or over a GitHub
+# hosted runner's memory. docs/verification/lint-memory.md records the measured
+# peaks, the margin one worker leaves, and how sensitive a shard's peak is to
+# which roots land in it. FM_LINT_JOBS=2 buys wall time back on a host with
+# memory to spare, with byte-identical diagnostics and exit selection. Sharding
+# itself is unconditional, so the file set, severities, source following, and
+# extended analysis never depend on the worker count.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.

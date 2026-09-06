@@ -848,60 +848,76 @@ SH
 }
 
 test_default_keeps_one_shellcheck_resident() {
-  local tmp fakebin big small live peaks telemetry padding out rc max
+  local tmp fakebin big small live events telemetry padding out rc observed
   tmp=$(fm_test_tmproot fm-lint-residency)
   mkdir -p "$tmp"
   fakebin=$(fm_fakebin "$tmp")
   big="$tmp/big.sh"
   small="$tmp/small.sh"
   live="$tmp/live"
-  peaks="$tmp/peaks"
+  events="$tmp/events"
   telemetry="$tmp/telemetry.tsv"
   mkdir -p "$live"
-  : > "$peaks"
+  : > "$events"
   # Two roots of different sizes so the largest-first assignment fills both
   # shards, which is what makes an overlapping second worker observable. Only
   # the byte weight matters here, so the larger root is padded with a comment.
   padding=$(printf '%400s' '' | tr ' ' x)
   printf '#!/usr/bin/env bash\nprintf ok\n# %s\n' "$padding" > "$big"
   printf '#!/usr/bin/env bash\nprintf ok\n' > "$small"
-  # Each invocation holds a presence file for a window wide enough to see a
-  # concurrent sibling, then records how many were resident alongside it.
+  # Each invocation brackets itself with a start and end line, so an overlap is
+  # an interleaving in the log rather than something a timing window has to
+  # catch. The first invocation holds its window open on a bounded poll that
+  # breaks the moment a sibling appears, so no fixed sleep has to outlast a
+  # loaded runner's whole spawn chain; a later invocation needs no window,
+  # because an overlapping sibling would already be recorded by then.
   cat > "$fakebin/shellcheck" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--version" ]; then
   printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
   exit 0
 fi
+# The start line lands before the presence file, so a sibling that counts this
+# process is guaranteed to have its own start line already recorded.
+printf 'start %s\n' "$$" >> "$FM_TEST_EVENT_LOG"
 : > "$FM_TEST_LIVE_DIR/$$"
-sleep 0.5
-find "$FM_TEST_LIVE_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l >> "$FM_TEST_PEAK_LOG"
+if [ "$(grep -c '^start ' "$FM_TEST_EVENT_LOG")" -eq 1 ]; then
+  i=0
+  while [ "$i" -lt 500 ]; do
+    [ "$(find "$FM_TEST_LIVE_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l)" -lt 2 ] || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+fi
+printf 'end %s\n' "$$" >> "$FM_TEST_EVENT_LOG"
 rm -f "$FM_TEST_LIVE_DIR/$$"
 SH
   chmod +x "$fakebin/shellcheck"
 
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_PEAK_LOG="$peaks" \
-    FM_LINT_TELEMETRY="$telemetry" "$LINT" "$big" "$small" 2>&1) || rc=$?
+  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_EVENT_LOG="$events" \
+    FM_LINT_TELEMETRY="$telemetry" \
+    "$LINT" "$big" "$small" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "default-worker lint failed: $out"
-  [ "$(wc -l < "$peaks" | tr -d '[:space:]')" -eq 2 ] \
-    || fail "the default did not run both shards: $(tr '\n' ' ' < "$peaks")"
-  max=$(LC_ALL=C sort -n "$peaks" | tail -1 | tr -d '[:space:]')
-  [ "$max" -eq 1 ] \
-    || fail "the default left $max ShellCheck processes resident at once; one graph at a time is what fits CI memory"
+  [ "$(grep -c '^start ' "$events")" -eq 2 ] \
+    || fail "the default did not run both shards: $(tr '\n' ' ' < "$events")"
+  observed=$(awk '{print $1}' "$events" | paste -sd, -)
+  [ "$observed" = "start,end,start,end" ] \
+    || fail "the default overlapped its ShellCheck workers ($observed); one graph at a time is what fits CI memory"
   assert_grep $'jobs\t1' "$telemetry" "the default worker count is no longer serial"
 
-  # Prove the residency probe can see an overlap, so the assertion above cannot
-  # pass vacuously through a probe that never observes a sibling.
-  : > "$peaks"
+  # Prove the probe can see an overlap, so the ordering assertion above cannot
+  # pass vacuously through a probe that could never observe a sibling.
+  : > "$events"
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_PEAK_LOG="$peaks" \
-    FM_LINT_JOBS=2 "$LINT" "$big" "$small" 2>&1) || rc=$?
+  out=$(PATH="$fakebin:$PATH" FM_TEST_LIVE_DIR="$live" FM_TEST_EVENT_LOG="$events" \
+    FM_LINT_JOBS=2 \
+    "$LINT" "$big" "$small" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "opt-in concurrent lint failed: $out"
-  max=$(LC_ALL=C sort -n "$peaks" | tail -1 | tr -d '[:space:]')
-  [ "$max" -eq 2 ] \
-    || fail "the residency probe never observed the opt-in concurrent worker"
-  pass "the default keeps one ShellCheck resident while jobs=2 stays an opt-in"
+  observed=$(awk '{print $1}' "$events" | paste -sd, -)
+  [ "$observed" = "start,start,end,end" ] \
+    || fail "the probe never observed the opt-in concurrent worker ($observed)"
+  pass "the default never overlaps its ShellCheck workers while jobs=2 stays an opt-in"
 }
 
 test_worker_trees_stop_on_signal() {

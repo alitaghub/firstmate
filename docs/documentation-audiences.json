@@ -429,6 +429,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/lint-memory.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/muse.md",
       "audience": "maintainer-verification"
     },
