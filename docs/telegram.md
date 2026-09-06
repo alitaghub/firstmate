@@ -54,7 +54,7 @@ A message is accepted only when every one of these holds:
 
 Anything else is refused, and where it is refused depends on who sent it.
 
-A message from a sender nobody allowlisted is dropped by the poll itself, before anything is written: it leaves no capture file, no line in an ingest summary, and no receipt. The bot's link opens for anybody, so a stranger's message must cost nothing on this machine at all - not even a file.
+An update the channel cannot attribute to an allowlisted sender is dropped by the poll itself, before anything is written: it leaves no capture file, no line in an ingest summary, and no receipt. The bot's link opens for anybody, so a stranger's message must cost nothing on this machine at all - not even a file. That also covers an update type that carries no plain `message` at all, an edit included, because the sender check has nothing to read there - see [When a message is refused](#when-a-message-is-refused).
 
 A message from an allowlisted sender that is refused for its *shape* - a forward, a `via_bot` composition, a bot account, empty text - is legitimate traffic the captain sent, so it is captured like any other. The reason is named in the ingest summary the adapter prints, and the raw update stays in the capture file under `state/procevent-inbox/`; the captured result itself carries only the poll's own status, not the verdict. He is also told why in one sentence - see [When a message is refused](#when-a-message-is-refused).
 
@@ -204,6 +204,10 @@ A refused message is never read and never becomes a note - that is the check wor
 If the sender is already on the allowlist, the bot replies with one sentence saying why, so a forward that was quietly dropped does not leave the captain waiting for an answer that is never coming.
 If the sender is *not* on the allowlist, nothing goes out at all: no reply, no connection. A bot that answers an unknown sender confirms to whoever probed it that it exists, which would turn the allowlist into a probe amplifier.
 The reply always goes to the allowlisted chat, never to the chat the refused message arrived on.
+
+**Editing a message on the phone is answered by silence.**
+An edit arrives as its own update type with no `message` object, so the sender check finds no id to match and the channel cannot tell the captain's edit from a stranger's: it is dropped at the poll with no note, no reply, and no record.
+The original message was already read as sent, so to correct himself the captain sends a new message rather than editing the old one.
 
 ## An unlocked phone
 
