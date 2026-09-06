@@ -36,8 +36,9 @@
 #            malformed. `unreachable` is a failure that fixes itself - no route,
 #            a 429, a 5xx, or a body that is not Bot API JSON - and re-arms;
 #            `error` is a channel nothing here can repair - Telegram refusing
-#            the call (401, 409), a removed token or allowlist, or a window the
-#            poll can never advance past - and stops to ask.
+#            the call (401, 409), a removed token or allowlist, a window the
+#            poll can never advance past, or empty windows that keep coming back
+#            without holding the long poll open - and stops to ask.
 # terminal   Every capture ends its registration; handle re-arms the next one.
 # self-announcing
 #            Declares that a fully applied capture announces itself downstream:
@@ -94,8 +95,17 @@ SEEN_DIR="$STATE/telegram.seen"
 INGEST_LOCK="$STATE/.telegram-ingest.lock"
 
 # Server-side long-poll window. Telegram returns the moment a message arrives,
-# so this bounds an idle window, not the latency of a real message.
-POLL_WINDOW=50
+# so this bounds an idle window, not the latency of a real message. Overridable
+# only so a test can watch the poll's own pacing without sitting through a real
+# window; production never sets it.
+POLL_WINDOW=${FM_TELEGRAM_POLL_WINDOW:-50}
+# How long an idle window must have stayed open to count as a long poll rather
+# than an instant answer. Telegram may close a window slightly early, while an
+# intermediary that ignores `timeout` - a captive portal, a caching proxy -
+# answers in milliseconds, so half the window separates the two with room to
+# spare.
+IDLE_HELD_OPEN=$((POLL_WINDOW / 2))
+[ "$IDLE_HELD_OPEN" -ge 1 ] || IDLE_HELD_OPEN=1
 # Updates per capture. Well under the runner's output bound even at Telegram's
 # 4096-character message limit; anything left over arrives on the next poll.
 POLL_LIMIT=50
@@ -221,7 +231,7 @@ keep_worth_capturing() { # <updates-json> -> the surviving updates as a JSON arr
 
 cmd_poll() {
   local offset='' failures=0 response result count payload rc transient detail
-  local kept kept_count batch_high
+  local kept kept_count batch_high window_started elapsed
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --offset) [ "$#" -ge 2 ] || die "--offset needs a nonnegative integer"; offset=$2; shift 2 ;;
@@ -235,6 +245,15 @@ cmd_poll() {
   trap "rm -f -- '$payload'" EXIT
 
   while :; do
+    # THE CONTRACT EVERY BRANCH BELOW KEEPS: an iteration either MAKES PROGRESS,
+    # or SLEEPS TRANSPORT_BACKOFF AND COUNTS against the failures budget. No
+    # path may do neither, because a path that does neither repeats as fast as
+    # the answer comes back, and the answer that triggers it comes back every
+    # time. Progress means the poll actually got somewhere: a long poll that
+    # stayed open, a window whose offset advanced, or a batch worth capturing.
+    # The budget resets on progress ALONE - never merely on a request that
+    # succeeded, which is what let an instant empty window repeat forever.
+    #
     # Re-read configuration every window so removing the token or the allowlist
     # takes effect within one poll rather than only at the next arm. That is the
     # captain's fastest local kill switch and it has to actually stop the poll.
@@ -245,6 +264,7 @@ cmd_poll() {
     rc=0
     transient=0
     detail=
+    window_started=$SECONDS
     response=$(fm_telegram_api getUpdates \
       --data-urlencode "offset=$offset" \
       --data-urlencode "timeout=$POLL_WINDOW" \
@@ -275,20 +295,38 @@ cmd_poll() {
       sleep "$TRANSPORT_BACKOFF"
       continue
     fi
-    # NOT reset here. A request that succeeded is not the same as a poll that
-    # got somewhere: an unadvanceable window is a successful transport carrying
-    # nothing usable, and resetting on the request would let it repeat forever.
-    # Progress means the poll moved forward - an idle window that confirms we
-    # are up to date, a window whose offset advanced, or a batch we captured.
+    # The budget is NOT reset here. A request that succeeded is not the same as
+    # a poll that got somewhere, and each branch below decides that for itself.
+    elapsed=$((SECONDS - window_started))
     count=$(printf '%s' "$result" | jq -r 'if type == "array" then length else "invalid" end' 2>/dev/null) || count=invalid
     case "$count" in
       invalid|''|*[!0-9]*) emit_result error "$offset" 0 "telegram returned a result that is not an update list"; return 0 ;;
     esac
     if [ "$count" -eq 0 ]; then
-      # An idle window is not news. Open the next one rather than capturing a
-      # result whose only content is that nothing happened. It IS progress: the
-      # channel answered and we are up to date, so the budget resets.
-      failures=0
+      if [ "$elapsed" -ge "$IDLE_HELD_OPEN" ]; then
+        # A long poll that stayed open and came back empty is not news. Open the
+        # next one rather than capturing a result whose only content is that
+        # nothing happened. It IS progress - the channel held our request for
+        # the window and we are up to date - so the budget resets.
+        failures=0
+        continue
+      fi
+      # An empty window that came back instantly did not hold a long poll open,
+      # so nothing between here and Telegram is honouring `timeout` - a captive
+      # portal, a caching proxy, a stub. Continuing straight into the next
+      # request would issue them as fast as the answer arrives, which is the
+      # request storm the rest of this poll works to avoid, so it waits and
+      # counts on the SAME budget as every other repeating answer. It gives up
+      # into `error` for the same reason an unadvanceable window does: what
+      # keeps answering is not Telegram, `unreachable` re-arms silently, and
+      # that would only move the loop from inside this process to across
+      # processes.
+      failures=$((failures + 1))
+      if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
+        emit_result error "$offset" 0 "telegram answered an empty window without holding the long poll open"
+        return 0
+      fi
+      sleep "$TRANSPORT_BACKOFF"
       continue
     fi
     kept=$(keep_worth_capturing "$result") || { emit_result error "$offset" 0 "cannot read the captured updates"; return 0; }

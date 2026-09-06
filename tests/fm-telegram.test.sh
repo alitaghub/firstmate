@@ -733,8 +733,10 @@ test_an_idle_channel_never_reports_itself_unreachable() {
 cat > /dev/null
 n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
 printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
-# Twelve idle windows - more than the retry budget - then a real message.
-if [ "$n" -lt 12 ]; then printf '{"ok":true,"result":[]}'; printf '\n200'; exit 0; fi
+# Twelve idle windows - more than the retry budget - then a real message. Each
+# one HOLDS THE WINDOW OPEN for the configured poll window, which is what a real
+# quiet chat looks like and is what makes it progress rather than a stuck poll.
+if [ "$n" -lt 12 ]; then sleep 1; printf '{"ok":true,"result":[]}'; printf '\n200'; exit 0; fi
 cat "$FM_TELEGRAM_TEST_FIRST"
 printf '\n200'
 SH
@@ -745,13 +747,74 @@ SH
         from: { id: $uid, is_bot: false, first_name: "Cap" },
         chat: { id: $uid, type: "private" },
         text: "still here" } } ] }')" > "$home/first-response.json"
+  # A two-second window keeps the wall clock sane; the fake holds each window
+  # open for it, so these are genuine long polls rather than instant answers.
+  export FM_TELEGRAM_POLL_WINDOW=2
   out=$(run_one_capture "$home" "$fakebin")
+  unset FM_TELEGRAM_POLL_WINDOW
 
   assert_contains "$out" 'autohandled: telegram' 'the idle channel produced no capture at all'
   [ "$(note_count "$home")" = 1 ] || fail "a quiet channel lost the message that followed $(note_count "$home")"
   assert_contains "$(note_bodies "$home")" 'still here' \
     "the message after a long quiet spell did not reach the captain's notes"
   pass 'a long quiet spell does not exhaust the retry budget and declare a healthy channel dead'
+}
+
+test_a_window_that_never_stays_open_gives_up_visibly() {
+  # The other half of the same contract, and again THE DEFECT IS THE REPETITION.
+  # An empty window answered in milliseconds is not a long poll: something
+  # between here and Telegram is ignoring the timeout the request asks for. If
+  # this path neither waits nor counts, the poll issues getUpdates as fast as
+  # the answer comes back - hundreds per second, forever, on the captain's own
+  # machine and against the rate limit the rest of the poll works to outlast.
+  local home out calls fakebin
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+n=$(cat "$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$FM_TELEGRAM_TEST_CALLS"
+# A poll that neither waits nor counts here would run until something killed it,
+# so this stops answering well past the budget rather than letting a regression
+# spin the whole suite. The assertions below still hold it to the budget.
+if [ "$n" -ge 100 ]; then
+  printf 'curl: (6) Could not resolve host: api.telegram.org\n' >&2
+  exit 6
+fi
+# Instantly empty, every time: a captive portal or a caching proxy answering for
+# Telegram. The production poll window is left alone here, so nothing but the
+# duration read can tell this apart from a genuine quiet chat.
+printf '{"ok":true,"result":[]}'
+printf '\n200'
+SH
+  chmod +x "$fakebin/curl"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  assert_contains "$out" 'not-autohandled' \
+    'a channel that never holds the window open was quietly marked handled, so it re-armed into the same loop'
+  assert_grep 'procevent telegram' "$home/state/.wake-queue" \
+    'a channel that never holds the window open raised no wake, so it would fail silently'
+  [ "$(note_count "$home")" = 0 ] || fail 'an instantly empty window queued a note'
+
+  # And it STAYS stopped: a reconcile is the watcher's own restart path, so a
+  # source still registered here would be back in the same spin within seconds.
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'the channel re-armed instead of stopping to ask' ;;
+  esac
+  FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'a reconcile restarted the channel into the same instant-empty windows' ;;
+  esac
+
+  # The bound is the point. A branch that stopped counting would run until the
+  # runner killed it, and one that stopped sleeping would burn through the whole
+  # budget in milliseconds - so the count has to land inside the budget AND the
+  # poll has to have spent real time getting there.
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) instead of waiting and retrying"
+  [ "$calls" -le 8 ] || fail "the poll made $calls attempts on windows that never stay open - the budget is not bounding it"
+  pass 'empty windows that never hold the poll open stop for good and raise a wake'
 }
 
 test_a_quiet_spell_between_two_rate_limit_bursts_resets_the_budget() {
@@ -777,7 +840,7 @@ if [ "$n" -lt 7 ] || { [ "$n" -ge 8 ] && [ "$n" -lt 15 ]; }; then
   printf '\n429'
   exit 0
 fi
-if [ "$n" -eq 7 ]; then printf '{"ok":true,"result":[]}'; printf '\n200'; exit 0; fi
+if [ "$n" -eq 7 ]; then sleep 1; printf '{"ok":true,"result":[]}'; printf '\n200'; exit 0; fi
 cat "$FM_TELEGRAM_TEST_FIRST"
 printf '\n200'
 SH
@@ -789,7 +852,9 @@ SH
         chat: { id: $uid, type: "private" },
         text: "through both bursts" } } ] }')" > "$home/first-response.json"
   printf '200' > "$home/first-status"
+  export FM_TELEGRAM_POLL_WINDOW=2
   out=$(run_one_capture "$home" "$fakebin")
+  unset FM_TELEGRAM_POLL_WINDOW
 
   assert_contains "$out" 'autohandled: telegram' 'the channel produced no capture across the two bursts'
   [ "$(note_count "$home")" = 1 ] || fail "the message after two rate-limit bursts was lost ($(note_count "$home") notes)"
@@ -1117,6 +1182,7 @@ test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
 test_a_window_that_can_never_advance_gives_up_visibly
 test_an_idle_channel_never_reports_itself_unreachable
+test_a_window_that_never_stays_open_gives_up_visibly
 test_a_quiet_spell_between_two_rate_limit_bursts_resets_the_budget
 test_an_over_limit_digest_is_cut_rather_than_dropped
 test_a_cut_never_splits_a_character
