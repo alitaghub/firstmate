@@ -52,7 +52,7 @@ A message is accepted only when every one of these holds:
 - the sender is not a bot account;
 - it has non-empty text.
 
-Anything else is refused, and where it is refused depends on who sent it.
+Anything else is refused, and where it is refused depends on who sent it - with one exception that depends on nobody. An update carrying no usable `update_id` is dropped by the poll whoever sent it, the captain included, because an id is what the read position moves to: an update without one can neither be recorded as read nor be moved past. It leaves no capture file, no line in an ingest summary, and no receipt, and a window made only of such updates ends at the *window the poll can never advance past* bullet below.
 
 An update the channel cannot attribute to an allowlisted sender is dropped by the poll itself, before anything is written: it leaves no capture file, no line in an ingest summary, and no receipt. The bot's link opens for anybody, so a stranger's message must cost nothing on this machine at all - not even a file. That also covers an update type that carries no plain `message` at all, an edit included, because the sender check has nothing to read there - see [When a message is refused](#when-a-message-is-refused).
 

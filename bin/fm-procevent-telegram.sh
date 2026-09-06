@@ -356,44 +356,52 @@ cmd_poll() {
     case "$kept_count" in
       invalid|''|*[!0-9]*) emit_result error "$offset" 0 "cannot read the captured updates"; return 0 ;;
     esac
+    # CAN THIS WINDOW MOVE THE READ POSITION? That is a property of the WINDOW,
+    # so it is asked of the whole result and answered before anything is decided
+    # about what was kept. Asking it only of the kept subset is what let a
+    # replayed window carrying one already-seen message from the captain slip
+    # past: it was kept, so the question was never asked at all.
+    batch_high=$(printf '%s' "$result" | jq -r '
+      [.[] | select((.update_id | type) == "number") | .update_id] | max // empty' 2>/dev/null) || batch_high=
+    advanced=0
+    case "$batch_high" in
+      ''|*[!0-9]*) ;;
+      # An id at or above the read position is the only thing that moves it. A
+      # batch whose ids are all BELOW it would set the same offset again, so it
+      # is not progress and must not be treated as any.
+      *) [ "$batch_high" -ge "$offset" ] && advanced=1 ;;
+    esac
+    if [ "$advanced" -eq 0 ]; then
+      # Nothing to advance past: either the window carries no usable id, or it
+      # carries only ids the read position is already past, so the next
+      # getUpdates asks for this very same window. THE POLL MUST NOT HAND THE
+      # RUNNER A BATCH THAT CANNOT MOVE THE READ POSITION - a capture that
+      # cannot move it re-arms at the same offset, is marked handled, and so
+      # tells nobody, which is the loop moved from inside this process to across
+      # processes. Dropping it loses nothing: the offset only advances after a
+      # note is durably on disk, so every id at or below it was already
+      # ingested. Inventing an offset instead would confirm updates nobody read,
+      # so this waits, on the SAME counter and backoff as every other repeating
+      # failure. What it gives up INTO is `error`, not `unreachable`: a window
+      # that keeps coming back unusable does not fix itself, and `unreachable`
+      # re-arms and acknowledges silently. `error` stops without re-arming and
+      # reaches firstmate, the same path a refused token or a second reader
+      # takes.
+      failures=$((failures + 1))
+      if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
+        emit_result error "$offset" 0 "telegram returned a window this poll cannot advance past"
+        return 0
+      fi
+      sleep "$TRANSPORT_BACKOFF"
+      continue
+    fi
     if [ "$kept_count" -eq 0 ]; then
       # Nothing here is ours. Move the read position past the window in memory
       # and open the next one: without that step the very next getUpdates asks
       # for the same window again and the poll spins on it. Nothing is written
       # to disk, so a replay after a crash simply drops the same updates again.
-      batch_high=$(printf '%s' "$result" | jq -r '
-        [.[] | select((.update_id | type) == "number") | .update_id] | max // empty' 2>/dev/null) || batch_high=
-      advanced=0
-      case "$batch_high" in
-        ''|*[!0-9]*) ;;
-        # An id at or above the read position is the only thing that moves it.
-        # A batch whose ids are all BELOW it - a cached body replayed for every
-        # request - would set the same offset again, so it is not progress and
-        # must not be treated as any.
-        *) [ "$batch_high" -ge "$offset" ] && advanced=1 ;;
-      esac
-      if [ "$advanced" -eq 1 ]; then
-        offset=$((batch_high + 1))
-        failures=0
-      else
-        # Nothing to advance past: either the window carries no usable id, or it
-        # carries only ids the read position is already past, so the next
-        # getUpdates asks for this very same window. Inventing an offset here
-        # would confirm updates nobody read, so this waits instead, on the SAME
-        # counter and backoff as every other repeating failure. What it gives up
-        # INTO is `error`, not `unreachable`: a window that keeps coming back
-        # unusable does not fix itself, and `unreachable` re-arms and
-        # acknowledges silently, which would only move the loop from inside this
-        # process to across processes. `error` stops without re-arming and
-        # reaches firstmate, the same path a refused token or a second reader
-        # takes.
-        failures=$((failures + 1))
-        if [ "$failures" -ge "$MAX_TRANSPORT_FAILURES" ]; then
-          emit_result error "$offset" 0 "telegram returned a window this poll cannot advance past"
-          return 0
-        fi
-        sleep "$TRANSPORT_BACKOFF"
-      fi
+      offset=$((batch_high + 1))
+      failures=0
       continue
     fi
     printf '%s' "$kept" | jq -c '.' > "$payload" || { emit_result error "$offset" 0 "cannot stage captured updates"; return 0; }
@@ -488,7 +496,7 @@ tell_the_captain_it_was_refused() { # <update> <reason> -> 0 when a reply was se
 
 cmd_ingest() { # <result-file>
   local file=$1 class payload count i update verdict text update_id note_id
-  local queued=0 skipped=0 rejected=0 highest=-1 offset
+  local queued=0 skipped=0 rejected=0 highest=-1 offset polled
   class=$(classify_result "$file")
   case "$class" in
     malformed) die "Telegram result is malformed" ;;
@@ -549,7 +557,17 @@ cmd_ingest() { # <result-file>
 
   if [ "$highest" -ge 0 ]; then
     offset=$((highest + 1))
-    write_offset "$offset" || die "cannot persist the Telegram offset"
+    # WHO OWNS MOVING THE READ POSITION, second half. The poll owns refusing a
+    # window that cannot move it; this side owns moving it past everything the
+    # capture carried, refused updates included. What neither owns is moving it
+    # BACKWARDS or standing still: a capture whose ids are all at or below the
+    # offset the poll asked with says nothing new, and rewriting that offset
+    # would confirm the same window for the next poll to fetch again.
+    polled=$(result_header_field "$file" offset 2>/dev/null) || polled=
+    case "$polled" in ''|*[!0-9]*) polled=0 ;; esac
+    if [ "$offset" -gt "$polled" ]; then
+      write_offset "$offset" || die "cannot persist the Telegram offset"
+    fi
   fi
   printf 'ingested: queued=%s skipped=%s rejected=%s\n' "$queued" "$skipped" "$rejected"
 }

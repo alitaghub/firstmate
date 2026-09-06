@@ -767,6 +767,58 @@ SH
   pass 'an update with no update_id stops the channel even when the captain sent it'
 }
 
+test_a_replayed_message_from_the_captain_stops_rather_than_spinning() {
+  # The sibling the offset-moved guard used to miss. Its window is not stranger
+  # traffic and not malformed: it is the captain's own message, already read,
+  # already receipted, replayed by something that answers every request with one
+  # cached body. The poll KEPT it - the sender is allowlisted - so the guard
+  # that asks "can this window move the read position?" never ran, the ingest
+  # rewrote the same offset from the same id, the receipt made it skip in
+  # silence, and the handled marker swallowed the wake. An armed channel reading
+  # nothing and telling nobody, on every runner cycle, forever.
+  local home out calls fakebin
+  home=$(new_home)
+  fakebin=$(fm_fakebin "$home")
+  # The read position is already past update 500 and its receipt is on disk:
+  # this message was delivered before the replay started.
+  mkdir -p "$home/state/telegram.seen"
+  printf '501\n' > "$home/state/telegram.offset"
+  printf 'note=cap-1\n' > "$home/state/telegram.seen/500"
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+cat > /dev/null
+n=\$(cat "\$FM_TELEGRAM_TEST_CALLS" 2>/dev/null || echo 0)
+printf '%s\\n' "\$((n + 1))" > "\$FM_TELEGRAM_TEST_CALLS"
+# The same cached body for every request, whatever offset was asked for.
+printf '{"ok":true,"result":[{"update_id":500,"message":{"message_id":9,"date":1757000000,"from":{"id":$CAPTAIN_ID,"is_bot":false,"first_name":"Cap"},"chat":{"id":$CAPTAIN_ID,"type":"private"},"text":"ship it"}}]}'
+printf '\\n200'
+SH
+  chmod +x "$fakebin/curl"
+  out=$(run_one_capture "$home" "$fakebin")
+
+  assert_contains "$out" 'not-autohandled' \
+    'a replayed message from the captain was quietly marked handled, so the channel re-armed into the same window'
+  assert_grep 'procevent telegram' "$home/state/.wake-queue" \
+    'a replayed message from the captain raised no wake, so the channel would spin silently'
+  [ "$(note_count "$home")" = 0 ] || fail 'a message that was already read was queued a second time'
+  # The read position never moves backwards or stands still on a replay.
+  [ "$(cat "$home/state/telegram.offset")" = 501 ] \
+    || fail "the replay rewrote the read position to $(cat "$home/state/telegram.offset") instead of leaving it at 501"
+
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'the channel re-armed after a replayed message instead of stopping to ask' ;;
+  esac
+  FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+  case "$(FM_HOME="$home" "$ROOT/bin/fm-procevent.sh" list 2>&1)" in
+    *telegram*) fail 'a reconcile restarted the channel on a window it can never advance past' ;;
+  esac
+
+  calls=$(cat "$home/calls" 2>/dev/null || echo 0)
+  [ "$calls" -gt 1 ] || fail "the poll gave up after $calls attempt(s) instead of waiting and retrying"
+  [ "$calls" -le 8 ] || fail "the poll made $calls attempts on one replayed message - the budget is not bounding it"
+  pass 'a window carrying only messages already read stops for good and raises a wake'
+}
+
 test_a_replayed_batch_stops_rather_than_spinning() {
   # THE DEFECT IS THE REPETITION, again, and this time the window looks perfectly
   # well formed: a caching proxy serves one cached body of stranger traffic for
@@ -1293,6 +1345,7 @@ test_a_gateway_page_keeps_the_channel_listening
 test_a_second_reader_stops_and_asks
 test_a_window_that_can_never_advance_gives_up_visibly
 test_a_malformed_update_from_the_captain_stops_rather_than_spinning
+test_a_replayed_message_from_the_captain_stops_rather_than_spinning
 test_a_replayed_batch_stops_rather_than_spinning
 test_an_idle_channel_never_reports_itself_unreachable
 test_a_window_that_never_stays_open_keeps_the_channel_listening
