@@ -27,10 +27,18 @@
 # Explicit paths always bypass this file-set selection and lint exactly the
 # given paths, matching the same config, without the workflow YAML check.
 #
-# Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# Canonical lint splits its roots over two stable logical shards and runs one
+# bounded worker at a time. Each shard writes separate diagnostics, and the
+# parent replays those outputs in deterministic shard and root order after every
+# worker finishes. One resident worker is the default because a full-analysis
+# ShellCheck holds its whole source graph in memory, so two concurrent workers
+# hold two graphs at once, and the canonical lint was killed at that combined
+# peak on a GitHub hosted runner. docs/verification/lint-memory.md records the
+# measured peaks, the margin one worker leaves, and how sensitive a shard's peak
+# is to which roots land in it. FM_LINT_JOBS=2 buys wall time back on a host with
+# memory to spare, with byte-identical diagnostics and exit selection. Sharding
+# itself is unconditional, so the file set, severities, source following, and
+# extended analysis never depend on the worker count.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -39,7 +47,7 @@
 #   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
-#   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
+#   fm-lint.sh --jobs <1|2> [path]...  override the worker count (default 1)
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -122,7 +130,7 @@ fm_lint_run_workflows() {
   "$SELF_DIR/fm-lint-workflows.sh"
 }
 
-JOBS=${FM_LINT_JOBS:-2}
+JOBS=${FM_LINT_JOBS:-1}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
 ANALYSIS_MODE=full
@@ -347,9 +355,13 @@ for path in "${ROOTS[@]}"; do
   index=$((index + 1))
 done
 
-# Largest-first deterministic greedy assignment keeps the two bounded workers
-# balanced without affecting replay order. Direct bytes are a stable portable
-# proxy after the expensive dynamic adapter source fan-out is cut.
+# Largest-first deterministic greedy assignment keeps the two stable shards
+# balanced without affecting replay order. Balance is what bounds the single
+# resident worker's peak, because an uneven split would hand one process a
+# larger source graph, and that per-shard peak is what the memory guarantee
+# rests on. An opt-in second worker gets an even split for the same reason.
+# Direct bytes are a stable portable proxy after the expensive dynamic adapter
+# source fan-out is cut.
 WORKER_LOADS=(0 0)
 LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
 while IFS="$TAB" read -r weight index path; do

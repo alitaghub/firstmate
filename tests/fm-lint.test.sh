@@ -847,6 +847,70 @@ SH
   pass "jobs=1 and jobs=2 preserve deterministic diagnostics, failures, cleanup bounds, and quiet telemetry"
 }
 
+test_default_keeps_one_shellcheck_resident() {
+  local tmp fakebin first second events telemetry out rc observed
+  tmp=$(fm_test_tmproot fm-lint-residency)
+  mkdir -p "$tmp"
+  fakebin=$(fm_fakebin "$tmp")
+  first="$tmp/first.sh"
+  second="$tmp/second.sh"
+  events="$tmp/events"
+  telemetry="$tmp/telemetry.tsv"
+  : > "$events"
+  # Two roots put one root on each shard, so both shards have work and a second
+  # worker is something the probe can observe.
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$first"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$second"
+  # Each invocation brackets itself with a start and end line, so an overlap is
+  # an interleaving in the log rather than something a timing window has to
+  # catch. The first invocation holds its window open until a sibling's start
+  # line appears, bounded so a serial default cannot hang; a later invocation
+  # needs no window, because an overlapping sibling is already recorded by then.
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+printf 'start %s\n' "$$" >> "$FM_TEST_EVENT_LOG"
+if [ "$(grep -c '^start ' "$FM_TEST_EVENT_LOG")" -eq 1 ]; then
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(grep -c '^start ' "$FM_TEST_EVENT_LOG")" -lt 2 ] || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+fi
+printf 'end %s\n' "$$" >> "$FM_TEST_EVENT_LOG"
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_EVENT_LOG="$events" \
+    FM_LINT_TELEMETRY="$telemetry" \
+    "$LINT" "$first" "$second" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "default-worker lint failed: $out"
+  [ "$(grep -c '^start ' "$events")" -eq 2 ] \
+    || fail "the default did not run both shards: $(tr '\n' ' ' < "$events")"
+  observed=$(awk '{print $1}' "$events" | paste -sd, -)
+  [ "$observed" = "start,end,start,end" ] \
+    || fail "the default overlapped its ShellCheck workers ($observed); one graph at a time is what fits CI memory"
+  assert_grep $'jobs\t1' "$telemetry" "the default worker count is no longer serial"
+
+  # Prove the probe can see an overlap, so the ordering assertion above cannot
+  # pass vacuously through a probe that could never observe a sibling.
+  : > "$events"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_EVENT_LOG="$events" \
+    FM_LINT_JOBS=2 \
+    "$LINT" "$first" "$second" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "opt-in concurrent lint failed: $out"
+  observed=$(awk '{print $1}' "$events" | paste -sd, -)
+  [ "$observed" = "start,start,end,end" ] \
+    || fail "the probe never observed the opt-in concurrent worker ($observed)"
+  pass "the default never overlaps its ShellCheck workers while jobs=2 stays an opt-in"
+}
+
 test_worker_trees_stop_on_signal() {
   local tmp fakebin fixture jobs telemetry lint_tmp pid_file out_file telemetry_file
   local parent_pid shellcheck_pid i parent_rc survivor
@@ -1013,6 +1077,7 @@ test_catches_a_real_lint_defect
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
+test_default_keeps_one_shellcheck_resident
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
