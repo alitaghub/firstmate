@@ -2875,7 +2875,7 @@ scratchpad_root_for() {  # <worktree>
 }
 
 test_leaked_scratchpad_process_is_reaped() {
-  local case_dir rc pid scratchpad
+  local case_dir rc pid scratchpad root survived=0
   case_dir=$(make_case leaked-scratchpad-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -2884,24 +2884,29 @@ test_leaked_scratchpad_process_is_reaped() {
   # task's HARNESS SCRATCHPAD rather than its worktree or tasktmp, which is
   # where a chrome-devtools-axi bridge and its Chrome sit after surviving at
   # ppid 1 (observed 2026-09-08, two days old, its task long torn down).
-  scratchpad=$(scratchpad_root_for "$case_dir/wt")/session/scratchpad
+  root=$(scratchpad_root_for "$case_dir/wt")
+  scratchpad=$root/session/scratchpad
   mkdir -p "$scratchpad"
   ( cd "$scratchpad" && exec sleep 300 ) &
   pid=$!
   disown
   sleep 0.3
-  kill -0 "$pid" 2>/dev/null || fail "leaked-scratchpad-reap: setup sleeper did not start"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -rf "$root"
+    fail "leaked-scratchpad-reap: setup sleeper did not start"
+  fi
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
+  # The derived root lives in the user's real shared scratchpad tree, so it is
+  # removed before any assertion can leave this function.
+  kill -0 "$pid" 2>/dev/null && survived=1
+  kill -KILL "$pid" 2>/dev/null || true
+  rm -rf "$root"
   expect_code 0 "$rc" "leaked-scratchpad-reap: teardown should still succeed"
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL "$pid" 2>/dev/null || true
-    rm -rf "$(scratchpad_root_for "$case_dir/wt")"
-    fail "leaked-scratchpad-reap: leaked scratchpad process survived teardown"
-  fi
-  rm -rf "$(scratchpad_root_for "$case_dir/wt")"
+  [ "$survived" -eq 0 ] \
+    || fail "leaked-scratchpad-reap: leaked scratchpad process survived teardown"
   assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
     "leaked-scratchpad-reap: teardown did not report reaping the scratchpad process"
   pass "a leaked process rooted in the task's own harness scratchpad is reaped by teardown too"

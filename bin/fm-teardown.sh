@@ -160,9 +160,13 @@
 #     process count, not by walking the worktree's file tree), expands that set
 #     with every transitive descendant, and sends TERM, then KILL after a short
 #     grace period to any survivor whose process identity still matches. All
-#     three roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     three roots are unique per task and never shared, so no other task's or
+#     the primary's process can ever be cwd-matched. The signalled set is those
+#     seeds PLUS their transitive descendants: a descendant is owned because the
+#     parent that owns it was cwd-matched in the same pass, and the start-time
+#     identity re-check immediately before every signal is what keeps a recycled
+#     pid from being touched once its owner has died.
+#     Idempotent: nothing left to find is a silent no-op.
 #     The scratchpad root and the descendant expansion are both there for
 #     browser leaks; docs/verification/browser-process-cleanup.md holds the
 #     dated evidence for both shapes:

@@ -6,6 +6,9 @@ This record supports the active guarantee that a torn-down task leaves no browse
 [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header owns the reap contract (its "Fix 2"), and [`bin/fm-spawn.sh`](../../bin/fm-spawn.sh) owns the per-task `CHROME_DEVTOOLS_AXI_SESSION` export.
 The portable regressions in [`tests/fm-teardown.test.sh`](../../tests/fm-teardown.test.sh) pin the reap logic with real processes and no harness.
 
+Paths below are shown with the home directory replaced by `<home>`, the numeric uid by `<uid>`, treehouse pool hashes by `<hash>`, Claude Code session ids by `<session-id>`, repository and branch names by `<repo>` and `<branch>`, and Chrome's random profile suffix by `<suffix>`.
+`<home-slug>` is `<home>` with the slug rule of the "Claude Code scratchpad layout" section already applied.
+
 ## Why the worktree and tasktmp roots were not enough
 
 Measured on 2026-09-08 on Linux 6.18 (WSL2), with Claude Code 2.1.260, `chrome-devtools-mcp` 1.8.0, `@playwright/mcp` (npx `latest`), `chrome-devtools-axi` (npm global), and Google Chrome at `/opt/google/chrome/chrome`.
@@ -26,9 +29,9 @@ Three distinct process shapes were present, and the pre-change reap roots (workt
 1. Harness-level MCP servers, one `npm exec chrome-devtools-mcp@latest` chain and one `npm exec @playwright/mcp@latest` chain per agent session, children of the agent process, each with the agent's own cwd:
 
 ```
-2766138  ppid=2765784  cwd=/home/ata/.treehouse/firstmate-572f91/1/firstmate
-           npm exec chrome-devtools-mcp@latest --executablePath /home/ata/.local/bin/chrome-for-mcp
-2766645  ppid=2766644  cwd=/home/ata/.treehouse/firstmate-572f91/1/firstmate
+2766138  ppid=2765784  cwd=<home>/.treehouse/firstmate-<hash>/1/firstmate
+           npm exec chrome-devtools-mcp@latest --executablePath <home>/.local/bin/chrome-for-mcp
+2766645  ppid=2766644  cwd=<home>/.treehouse/firstmate-<hash>/1/firstmate
            node .bin/playwright-mcp
 ```
 
@@ -37,7 +40,7 @@ Three distinct process shapes were present, and the pre-change reap roots (workt
    Observed live from `@playwright/mcp`:
 
 ```
-2860266  ppid=2766645  cwd=/home/ata/.treehouse/firstmate-572f91/1/firstmate
+2860266  ppid=2766645  cwd=<home>/.treehouse/firstmate-<hash>/1/firstmate
            /opt/google/chrome/chrome --disable-field-trial-config ...
 2860309  ppid=2860266  cwd=/proc/2860357/fdinfo    --type=zygote
 2860362  ppid=2860309  cwd=/proc/2860357/fdinfo    --type=zygote
@@ -47,26 +50,26 @@ Three distinct process shapes were present, and the pre-change reap roots (workt
 3. A `chrome-devtools-axi` bridge, surviving at ppid 1 with its cwd in the Claude Code session scratchpad rather than the worktree, holding its own `chrome-devtools-mcp` and a real headless Chrome:
 
 ```
-668786   ppid=1        cwd=/tmp/claude-1000/-home-ata--treehouse-firstmate-bridge-3b1c48-6-firstmate-bridge/ff0b23a0-.../scratchpad
+668786   ppid=1        cwd=/tmp/claude-<uid>/<home-slug>--treehouse-firstmate-bridge-<hash>-6-firstmate-bridge/<session-id>/scratchpad
            node .../chrome-devtools-axi/dist/bin/chrome-devtools-axi-bridge.js
 668932   ppid=668931   cwd=<same scratchpad>    chrome-devtools-mcp
-669094   ppid=668932   cwd=<same scratchpad>    /opt/google/chrome/chrome --headless=new --user-data-dir=/tmp/puppeteer_dev_chrome_profile-JHUuGY
+669094   ppid=668932   cwd=<same scratchpad>    /opt/google/chrome/chrome --headless=new --user-data-dir=/tmp/puppeteer_dev_chrome_profile-<suffix>
 669096   ppid=1        cwd=<same scratchpad>    /opt/google/chrome/chrome_crashpad_handler
 ```
 
-That bridge had started two days earlier and belonged to the already-removed task worktree `/home/ata/.treehouse/firstmate-bridge-3b1c48/6/firstmate-bridge`; no `state/*.meta` in that home still named it.
+That bridge had started two days earlier and belonged to the already-removed task worktree `<home>/.treehouse/firstmate-bridge-<hash>/6/firstmate-bridge`; no `state/*.meta` in that home still named it.
 Shape 2's subprocesses and shape 3's whole chain are why the reap needs both the harness scratchpad root and the descendant expansion.
 
 ## Claude Code scratchpad layout
 
 Claude Code places a session's scratchpad at `<tmpdir>/claude-<uid>/<slug>/<session-uuid>/scratchpad`, where `<slug>` is the session's own working directory with every non-alphanumeric byte replaced by `-`.
-Confirmed against every directory present under `/tmp/claude-1000` on 2026-09-08, for example:
+Confirmed against every directory present under `/tmp/claude-<uid>` on 2026-09-08, for example:
 
 ```
-/home/ata/.treehouse/firstmate-bridge-3b1c48/6/firstmate-bridge
-  -> -home-ata--treehouse-firstmate-bridge-3b1c48-6-firstmate-bridge
-/home/ata/github/ace-copilot/.claude/worktrees/pr-review-automation-82eb3b
-  -> -home-ata-github-ace-copilot--claude-worktrees-pr-review-automation-82eb3b
+<home>/.treehouse/firstmate-bridge-<hash>/6/firstmate-bridge
+  -> <home-slug>--treehouse-firstmate-bridge-<hash>-6-firstmate-bridge
+<home>/github/<repo>/.claude/worktrees/<branch>-<hash>
+  -> <home-slug>-github-<repo>--claude-worktrees-<branch>-<hash>
 ```
 
 The session slugs its own working directory, which the kernel reports with every symlink already resolved, while the recorded worktree path may still carry a symlinked component.
@@ -94,4 +97,4 @@ for d in /proc/[0-9]*; do
 done | awk '{rss[$1]+=$2; n[$1]++} END{for (k in rss) printf "%6d MiB %2d procs %s\n", rss[k]/1024, n[k], k}' | sort -rn
 ```
 
-Most of those groups belonged to Claude Code sessions that are not Firstmate tasks, including cloud sessions under `~/.claude/remote/ccd-cli/`, which no Firstmate teardown owns or may touch.
+Most of those groups belonged to Claude Code sessions that are not Firstmate tasks, including cloud sessions under `~/.claude/remote/<agent>/`, which no Firstmate teardown owns or may touch.
