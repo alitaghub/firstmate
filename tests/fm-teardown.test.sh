@@ -2948,10 +2948,17 @@ test_descendant_that_chdirs_out_of_reach_is_reaped() {
   # reaches them (observed 2026-09-08 with @playwright/mcp's Chrome: the
   # browser's cwd was the worktree, every zygote/renderer/utility child's was
   # not). This fixture reproduces that split with a child that chdir's to /.
+  # The child also IGNORES TERM while the parent dies on it, so the child is
+  # orphaned to ppid 1 before the KILL escalation and no longer reachable from
+  # any owned pid - the shape a rescan-gated escalation silently misses.
   ( cd "$case_dir/wt" && exec perl -e '
       my $out = shift;
       my $pid = fork; die "fork failed" unless defined $pid;
-      if (!$pid) { chdir "/" or die "chdir failed"; exec "sleep", "300" }
+      if (!$pid) {
+        chdir "/" or die "chdir failed";
+        $SIG{TERM} = "IGNORE";
+        exec "sleep", "300";
+      }
       open my $fh, ">", $out or die "open failed"; print $fh "$pid\n"; close $fh;
       sleep 300;
     ' "$case_dir/child.pid" ) &
@@ -2987,7 +2994,12 @@ test_descendant_that_chdirs_out_of_reach_is_reaped() {
     fail "chdir-away-descendant-reap: the chdir'd descendant survived teardown"
   fi
   kill -KILL "$parent" 2>/dev/null || true
-  pass "a descendant that chdir'd out of every task root is reaped through its owning parent"
+  # The child only dies to KILL, so teardown must have reported force-killing it
+  # by pid after its parent was already gone.
+  grep -Eq "force-killing leaked worktree process\(es\) for [^:]*:.*\b$child\b" \
+    "$case_dir/stderr" \
+    || fail "chdir-away-descendant-reap: teardown did not report force-killing the orphaned descendant $child"
+  pass "a descendant orphaned by its parent's death on TERM is still force-killed"
 }
 
 test_lsof_absent_reaps_tmux_process_group() {
@@ -3064,13 +3076,13 @@ test_reused_pid_identity_is_not_force_killed() {
   pid=$!
   disown
   sleep 0.2
+  # The pid sits under the worktree until its start time changes; once the
+  # replacement process holds it, no scan reports it under a task root again.
   cat > "$case_dir/fakebin/lsof" <<EOF
 #!/usr/bin/env bash
-count=0
-[ ! -f '$case_dir/lsof-count' ] || count=\$(cat '$case_dir/lsof-count')
-count=\$((count + 1))
-printf '%s\n' "\$count" > '$case_dir/lsof-count'
-if [ "\$count" -le 3 ]; then printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'; fi
+seen=0
+[ ! -f '$case_dir/ps-count' ] || seen=\$(cat '$case_dir/ps-count')
+if [ "\$seen" -le 2 ]; then printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'; fi
 EOF
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash

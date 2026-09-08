@@ -1725,21 +1725,26 @@ task_pid_list_contains() {  # <pid-list> <pid>
 # task-exclusive as that path: concurrent tasks always hold different worktrees,
 # and sequential reuse of one worktree only ever exposes an already-finished
 # task's leftovers. A root that does not exist is a silent no-op downstream, so
-# both the TMPDIR-relative and the /tmp form are offered rather than guessed
-# between.
+# every candidate spelling is offered rather than guessed between: the session
+# slugs its own cwd, which is the symlink-resolved path, while the recorded
+# worktree path may still carry a symlinked component.
 task_scratchpad_roots() {  # <worktree>
-  local wt=$1 uid slug base seen=""
+  local wt=$1 uid path slug base root seen=""
   [ -n "$wt" ] || return 0
   uid=$(id -u 2>/dev/null) || return 0
   case "$uid" in ''|*[!0-9]*) return 0 ;; esac
-  slug=$(printf '%s' "$wt" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
-  [ -n "$slug" ] || return 0
-  for base in "${TMPDIR:-/tmp}" /tmp; do
-    base=${base%/}
-    [ -n "$base" ] || continue
-    case "$seen" in *"|$base|"*) continue ;; esac
-    seen="$seen|$base|"
-    printf '%s/claude-%s/%s\n' "$base" "$uid" "$slug"
+  for path in "$(cd "$wt" 2>/dev/null && pwd -P || true)" "$wt"; do
+    [ -n "$path" ] || continue
+    slug=$(printf '%s' "$path" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
+    [ -n "$slug" ] || continue
+    for base in "${TMPDIR:-/tmp}" /tmp; do
+      base=${base%/}
+      [ -n "$base" ] || continue
+      root="$base/claude-$uid/$slug"
+      case "$seen" in *"|$root|"*) continue ;; esac
+      seen="$seen|$root|"
+      printf '%s\n' "$root"
+    done
   done
 }
 
@@ -1857,7 +1862,7 @@ reap_task_backend_process_group() {  # <label>
 # the recheck. A missing lsof uses the backend process-group fallback; an lsof
 # scan error refuses before destructive teardown.
 reap_task_worktree_processes() {  # <label> <dir>...
-  local label=$1 pids pid identity current_pids i pass=1 max_passes=3
+  local label=$1 pids pid identity i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
   shift
   if ! command -v lsof >/dev/null 2>&1; then
@@ -1895,49 +1900,37 @@ EOF
       pass=$((pass + 1))
       continue
     fi
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
-      return 1
-    fi
-    current_pids=$TASK_PIDS
     echo "teardown: reaping leaked $label process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+    # Ownership is established once per pass, by the scan above. It is not
+    # re-derived before each signal: a descendant orphaned by its parent's death
+    # on TERM leaves every owned set the next scan can build, and re-requiring
+    # membership would strand exactly the renderers this reap exists to reach.
+    # The identity match still runs immediately before every signal, which is
+    # what keeps a recycled pid from being signalled.
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+      if task_process_identity_matches "$pid" "$identity"; then
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
     sleep 1
-    if ! task_pids_under_roots "$@"; then
-      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
-      return 1
-    fi
-    current_pids=$TASK_PIDS
     remaining_pids=()
     remaining_identities=()
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
-      if task_pid_list_contains "$current_pids" "$pid" \
-         && task_process_identity_matches "$pid" "$identity"; then
+      if task_process_identity_matches "$pid" "$identity"; then
         remaining_pids+=("$pid")
         remaining_identities+=("$identity")
       fi
     done
     if [ "${#remaining_pids[@]}" -gt 0 ]; then
       echo "teardown: force-killing leaked $label process(es) for $ID: ${remaining_pids[*]}" >&2
-      if ! task_pids_under_roots "$@"; then
-        echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
-        return 1
-      fi
-      current_pids=$TASK_PIDS
       for i in "${!remaining_pids[@]}"; do
         pid=${remaining_pids[$i]}
         identity=${remaining_identities[$i]}
-        if task_pid_list_contains "$current_pids" "$pid" \
-           && task_process_identity_matches "$pid" "$identity"; then
+        if task_process_identity_matches "$pid" "$identity"; then
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done
@@ -2892,11 +2885,13 @@ if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   # Roots, in the order the header's Fix 2 describes them: the worktree, the
   # per-task temp root, and the harness scratchpad root(s) derived from the
-  # worktree path. Word splitting on the newline-separated derivation is
-  # intended - a worktree path containing whitespace cannot produce a slug
-  # containing whitespace.
-  # shellcheck disable=SC2046
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" $(task_scratchpad_roots "$WT")
+  # worktree path.
+  REAP_ROOTS=("$WT" "$TASK_TMP")
+  while IFS= read -r REAP_ROOT; do
+    [ -n "$REAP_ROOT" ] || continue
+    REAP_ROOTS+=("$REAP_ROOT")
+  done < <(task_scratchpad_roots "$WT")
+  reap_task_worktree_processes worktree "${REAP_ROOTS[@]}"
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already

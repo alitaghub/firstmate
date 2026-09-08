@@ -69,6 +69,9 @@ Confirmed against every directory present under `/tmp/claude-1000` on 2026-09-08
   -> -home-ata-github-ace-copilot--claude-worktrees-pr-review-automation-82eb3b
 ```
 
+The session slugs its own working directory, which the kernel reports with every symlink already resolved, while the recorded worktree path may still carry a symlinked component.
+`task_scratchpad_roots` therefore emits both spellings, canonical first.
+
 This layout is a vendor convention, so re-verify it after a Claude Code upgrade by comparing a live session's scratchpad path against the slug rule above.
 A derived root that does not exist is a silent no-op in the reap, so a layout change degrades this backstop to the pre-change behavior rather than breaking teardown.
 
