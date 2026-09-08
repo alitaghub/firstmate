@@ -155,13 +155,33 @@
 #     two `go test` binaries, deadlines blown past by ~100x, pinning CPU for
 #     hours with no live task meta to attribute them to once teardown had
 #     already removed it). reap_task_worktree_processes finds every process
-#     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
-#     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
-#     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
+#     whose CURRENT WORKING DIRECTORY is this task's own worktree, tasktmp
+#     root, or harness scratchpad root via `lsof -a -d cwd` (cheap: bounded by
+#     process count, not by walking the worktree's file tree), expands that set
+#     with every transitive descendant, and sends TERM, then KILL after a short
+#     grace period to any survivor whose process identity still matches. All
+#     three roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#     The scratchpad root and the descendant expansion are both there for
+#     browser leaks; docs/verification/browser-process-cleanup.md holds the
+#     dated evidence for both shapes:
+#       - A chrome-devtools-axi bridge spawns its own chrome-devtools-mcp and a
+#         real headless Chrome, then survives at ppid 1 with its cwd in the
+#         HARNESS SCRATCHPAD (Claude Code: <tmp>/claude-<uid>/<cwd-slug>/
+#         <session-uuid>/scratchpad) rather than the worktree, so the
+#         worktree/tasktmp roots never saw it. task_scratchpad_roots derives
+#         that root from the task's own recorded worktree path. The bridge is
+#         a per-session
+#         singleton, so fm-spawn gives each crew its own
+#         CHROME_DEVTOOLS_AXI_SESSION; that is what makes a bridge found under
+#         a task's scratchpad the task's own rather than one a concurrent task
+#         is still using.
+#       - A browser's own subprocesses (zygote, renderer, gpu, utility) chdir
+#         into /proc/<pid>/fdinfo, so no cwd scan can ever see them; only
+#         descent from the cwd-matched parent that owns them reaches them, and
+#         without it KILLing the browser strands the renderers that hold the
+#         memory.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1697,6 +1717,70 @@ task_pid_list_contains() {  # <pid-list> <pid>
   printf '%s\n' "$1" | grep -Fxq "$2"
 }
 
+# The harness scratchpad root(s) for a task's worktree (see script header's
+# Fix 2). Claude Code puts a session's scratchpad at
+# <tmpdir>/claude-<uid>/<slug>/<session-uuid>/scratchpad, where <slug> is the
+# session's own cwd with every non-alphanumeric byte replaced by '-'. Derived
+# from the task's RECORDED worktree path alone, so it is exactly as
+# task-exclusive as that path: concurrent tasks always hold different worktrees,
+# and sequential reuse of one worktree only ever exposes an already-finished
+# task's leftovers. A root that does not exist is a silent no-op downstream, so
+# both the TMPDIR-relative and the /tmp form are offered rather than guessed
+# between.
+task_scratchpad_roots() {  # <worktree>
+  local wt=$1 uid slug base seen=""
+  [ -n "$wt" ] || return 0
+  uid=$(id -u 2>/dev/null) || return 0
+  case "$uid" in ''|*[!0-9]*) return 0 ;; esac
+  slug=$(printf '%s' "$wt" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
+  [ -n "$slug" ] || return 0
+  for base in "${TMPDIR:-/tmp}" /tmp; do
+    base=${base%/}
+    [ -n "$base" ] || continue
+    case "$seen" in *"|$base|"*) continue ;; esac
+    seen="$seen|$base|"
+    printf '%s/claude-%s/%s\n' "$base" "$uid" "$slug"
+  done
+}
+
+# Add every transitive descendant of the pids already in TASK_PIDS. A process
+# whose cwd matches a task root owns its children even when they chdir'd out of
+# reach of any cwd scan, which is exactly what a browser's zygote, renderer,
+# gpu and utility subprocesses do (see script header's Fix 2). Never adds pid 1
+# or this script's own pid. Failure means the process table could not be read,
+# which the caller must treat as an unsafe result rather than an empty one.
+task_expand_pid_descendants() {
+  local table expanded
+  [ -n "$TASK_PIDS" ] || return 0
+  table=$(ps -eo pid=,ppid= 2>/dev/null) || return 1
+  [ -n "$table" ] || return 1
+  # One awk pass, not a shell loop per generation: this runs on every scan of
+  # every reap pass, and a fork per process per generation would add seconds to
+  # each teardown.
+  expanded=$(printf '%s\n===\n%s\n' "$TASK_PIDS" "$table" | awk -v self="$$" '
+    $0 == "===" { table = 1; next }
+    table == 0 { if ($1 ~ /^[0-9]+$/) owned[$1] = 1; next }
+    {
+      if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) { parent[$1] = $2; pids[++n] = $1 }
+    }
+    END {
+      changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= n; i++) {
+          pid = pids[i]
+          if (pid == 1 || pid == self) continue
+          if (pid in owned) continue
+          if (parent[pid] in owned) { owned[pid] = 1; changed = 1 }
+        }
+      }
+      for (pid in owned) print pid
+    }
+  ' | sort -un) || return 1
+  [ -n "$expanded" ] || return 1
+  TASK_PIDS=$expanded
+}
+
 task_pids_under_roots() {  # <dir>...
   TASK_PIDS=
   TASK_PIDS_FAILED_DIR=
@@ -1711,6 +1795,15 @@ task_pids_under_roots() {  # <dir>...
 $dir_pids"
   done
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
+  if ! task_expand_pid_descendants; then
+    # The cwd scan succeeded but the process table did not, so the owned set
+    # cannot be completed. Name the real cause before the caller's refusal,
+    # which reports the root rather than the failing scan.
+    echo "teardown: the process table could not be read; cannot establish which processes belong to $ID" >&2
+    TASK_PIDS=
+    TASK_PIDS_FAILED_DIR=${1:-}
+    return 1
+  fi
 }
 
 reap_task_backend_process_group() {  # <label>
@@ -2797,7 +2890,13 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  # Roots, in the order the header's Fix 2 describes them: the worktree, the
+  # per-task temp root, and the harness scratchpad root(s) derived from the
+  # worktree path. Word splitting on the newline-separated derivation is
+  # intended - a worktree path containing whitespace cannot produce a slug
+  # containing whitespace.
+  # shellcheck disable=SC2046
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" $(task_scratchpad_roots "$WT")
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
