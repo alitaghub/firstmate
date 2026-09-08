@@ -176,8 +176,7 @@
 #         <session-uuid>/scratchpad) rather than the worktree, so the
 #         worktree/tasktmp roots never saw it. task_scratchpad_roots derives
 #         that root from the task's own recorded worktree path. The bridge is
-#         a per-session
-#         singleton, so fm-spawn gives each crew its own
+#         a per-session singleton, so fm-spawn gives each crew its own
 #         CHROME_DEVTOOLS_AXI_SESSION; that is what makes a bridge found under
 #         a task's scratchpad the task's own rather than one a concurrent task
 #         is still using.
