@@ -3243,6 +3243,16 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Give this crew its own browser bridge. chrome-devtools-axi's bridge is a
+# per-session singleton (default session = one process on one port for the whole
+# user), so without a per-task session name every concurrent crew shares one
+# bridge and one browser - which means the bridge a finished task leaves behind
+# cannot be reaped without risking a browser a live crew is still driving.
+# Naming the session after the task makes that bridge, its chrome-devtools-mcp
+# and its Chrome the task's own, which is what lets fm-teardown's Fix 2 reap
+# them. Same channel as GOTMPDIR so every backend and harness gets it before
+# launch.
+spawn_send_text_line "$T" "export CHROME_DEVTOOLS_AXI_SESSION=$ID"
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.

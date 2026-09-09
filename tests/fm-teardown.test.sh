@@ -2867,6 +2867,146 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+# The harness scratchpad root for a worktree, derived the way Claude Code names
+# it: <tmpdir>/claude-<uid>/<cwd with every non-alphanumeric byte as '-'>.
+scratchpad_root_for() {  # <worktree>
+  printf '%s/claude-%s/%s\n' "${TMPDIR:-/tmp}" "$(id -u)" \
+    "$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9' '-')"
+}
+
+test_leaked_scratchpad_process_is_reaped() {
+  local case_dir rc pid scratchpad root survived=0
+  case_dir=$(make_case leaked-scratchpad-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # The observed browser leak's shape: a disowned process whose cwd is the
+  # task's HARNESS SCRATCHPAD rather than its worktree or tasktmp, which is
+  # where a chrome-devtools-axi bridge and its Chrome sit after surviving at
+  # ppid 1 (observed 2026-09-08, two days old, its task long torn down).
+  root=$(scratchpad_root_for "$case_dir/wt")
+  scratchpad=$root/session/scratchpad
+  mkdir -p "$scratchpad"
+  ( cd "$scratchpad" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -rf "$root"
+    fail "leaked-scratchpad-reap: setup sleeper did not start"
+  fi
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  # The derived root lives in the user's real shared scratchpad tree, so it is
+  # removed before any assertion can leave this function.
+  kill -0 "$pid" 2>/dev/null && survived=1
+  kill -KILL "$pid" 2>/dev/null || true
+  rm -rf "$root"
+  expect_code 0 "$rc" "leaked-scratchpad-reap: teardown should still succeed"
+  [ "$survived" -eq 0 ] \
+    || fail "leaked-scratchpad-reap: leaked scratchpad process survived teardown"
+  assert_grep "reaping leaked worktree process" "$case_dir/stderr" \
+    "leaked-scratchpad-reap: teardown did not report reaping the scratchpad process"
+  pass "a leaked process rooted in the task's own harness scratchpad is reaped by teardown too"
+}
+
+test_other_tasks_scratchpad_process_is_spared() {
+  local case_dir rc pid other_root survived=0
+  case_dir=$(make_case foreign-scratchpad-spared)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # A concurrent task's browser, in the scratchpad root of a DIFFERENT worktree
+  # path. Reaping by cwd must stay bounded to the torn-down task's own roots -
+  # two crews run at once routinely, and killing this one is the exact failure
+  # a name match on `chrome` would cause.
+  other_root=$(scratchpad_root_for "$case_dir/other-wt")/session/scratchpad
+  mkdir -p "$other_root"
+  ( cd "$other_root" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "foreign-scratchpad-spared: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  kill -0 "$pid" 2>/dev/null && survived=1
+  kill -KILL "$pid" 2>/dev/null || true
+  rm -rf "$(scratchpad_root_for "$case_dir/other-wt")"
+  expect_code 0 "$rc" "foreign-scratchpad-spared: teardown should still succeed"
+  [ "$survived" -eq 1 ] \
+    || fail "foreign-scratchpad-spared: teardown reaped another task's scratchpad process"
+  pass "a process in ANOTHER task's scratchpad root is left alone by this task's teardown"
+}
+
+test_descendant_that_chdirs_out_of_reach_is_reaped() {
+  local case_dir rc parent child child_cwd
+  case_dir=$(make_case chdir-away-descendant-reap)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+
+  # A browser's own subprocesses chdir into /proc/<pid>/fdinfo, so no cwd scan
+  # can ever see them; only descent from the cwd-matched parent that owns them
+  # reaches them (observed 2026-09-08 with @playwright/mcp's Chrome: the
+  # browser's cwd was the worktree, every zygote/renderer/utility child's was
+  # not). This fixture reproduces that split with a child that chdir's to /.
+  # The child also IGNORES TERM while the parent dies on it, so the child is
+  # orphaned to ppid 1 before the KILL escalation and no longer reachable from
+  # any owned pid - the shape a rescan-gated escalation silently misses.
+  ( cd "$case_dir/wt" && exec perl -e '
+      my $out = shift;
+      my $pid = fork; die "fork failed" unless defined $pid;
+      if (!$pid) {
+        chdir "/" or die "chdir failed";
+        $SIG{TERM} = "IGNORE";
+        exec "sleep", "300";
+      }
+      open my $fh, ">", $out or die "open failed"; print $fh "$pid\n"; close $fh;
+      sleep 300;
+    ' "$case_dir/child.pid" ) &
+  parent=$!
+  disown
+  sleep 0.5
+  kill -0 "$parent" 2>/dev/null \
+    || fail "chdir-away-descendant-reap: setup parent did not start"
+  child=$(cat "$case_dir/child.pid" 2>/dev/null || true)
+  case "$child" in ''|*[!0-9]*)
+    kill -KILL "$parent" 2>/dev/null || true
+    fail "chdir-away-descendant-reap: setup child pid was never recorded"
+    ;;
+  esac
+  # Prove the divergence the case depends on: the child's cwd really is out of
+  # every task root's reach, so a pass cannot come from a cwd match.
+  child_cwd=$(readlink "/proc/$child/cwd" 2>/dev/null || true)
+  if [ -n "$child_cwd" ]; then
+    case "$child_cwd" in
+      "$case_dir"/*|"$case_dir")
+        kill -KILL "$parent" "$child" 2>/dev/null || true
+        fail "chdir-away-descendant-reap: fixture child kept a cwd inside the task roots"
+        ;;
+    esac
+  fi
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "chdir-away-descendant-reap: teardown should still succeed"
+  if kill -0 "$child" 2>/dev/null; then
+    kill -KILL "$parent" "$child" 2>/dev/null || true
+    fail "chdir-away-descendant-reap: the chdir'd descendant survived teardown"
+  fi
+  kill -KILL "$parent" 2>/dev/null || true
+  # The child only dies to KILL, so teardown must have reported force-killing it
+  # by pid after its parent was already gone.
+  grep -Eq "force-killing leaked worktree process\(es\) for [^:]*:.*\b$child\b" \
+    "$case_dir/stderr" \
+    || fail "chdir-away-descendant-reap: teardown did not report force-killing the orphaned descendant $child"
+  pass "a descendant orphaned by its parent's death on TERM is still force-killed"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -2941,13 +3081,13 @@ test_reused_pid_identity_is_not_force_killed() {
   pid=$!
   disown
   sleep 0.2
+  # The pid sits under the worktree until its start time changes; once the
+  # replacement process holds it, no scan reports it under a task root again.
   cat > "$case_dir/fakebin/lsof" <<EOF
 #!/usr/bin/env bash
-count=0
-[ ! -f '$case_dir/lsof-count' ] || count=\$(cat '$case_dir/lsof-count')
-count=\$((count + 1))
-printf '%s\n' "\$count" > '$case_dir/lsof-count'
-if [ "\$count" -le 3 ]; then printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'; fi
+seen=0
+[ ! -f '$case_dir/ps-count' ] || seen=\$(cat '$case_dir/ps-count')
+if [ "\$seen" -le 2 ]; then printf 'p%s\nfcwd\nn%s\n' '$pid' '$case_dir/wt'; fi
 EOF
   cat > "$case_dir/fakebin/ps" <<'SH'
 #!/usr/bin/env bash
@@ -3264,6 +3404,9 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_leaked_scratchpad_process_is_reaped
+test_other_tasks_scratchpad_process_is_spared
+test_descendant_that_chdirs_out_of_reach_is_reaped
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed

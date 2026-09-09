@@ -425,6 +425,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/browser-process-cleanup.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
