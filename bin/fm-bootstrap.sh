@@ -147,6 +147,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
@@ -1064,7 +1065,12 @@ x_mode_setup() {
     fi
   }
 
-  mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
+  # Load the state-root owner here rather than relying on another function
+  # having run first: this path is reached whether or not the sync sweeps ran.
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_private_dir_ensure "$STATE" 2>/dev/null || { fmx_arm_failed; return 0; }
+  mkdir -p "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
   case "$FM_HOME" in
     /*) shim_home=$FM_HOME ;;

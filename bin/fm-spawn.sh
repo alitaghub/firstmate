@@ -468,7 +468,7 @@ spawn_remote_secondmate() {
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
-  mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
+  fm_private_dir_ensure "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
     echo "error: another spawn is already creating task $id" >&2
@@ -849,7 +849,7 @@ spawn_abort_cleanup() {
           fi
           SPAWN_FRESH_COMMIT_PENDING=0
         fi
-        mkdir -p "$STATE" 2>/dev/null || true
+        fm_private_dir_ensure "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
           SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
           {
@@ -1042,7 +1042,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ]; then
-  mkdir -p "$STATE" || {
+  fm_private_dir_ensure "$STATE" || {
     echo "error: could not create parent state directory" >&2
     exit 1
   }
@@ -2645,7 +2645,7 @@ mkdir -p "$TASK_TMP/gotmp"
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
 # check or leak into a commit.
-mkdir -p "$STATE"
+fm_private_dir_ensure "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {

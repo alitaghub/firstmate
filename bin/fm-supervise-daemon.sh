@@ -150,6 +150,7 @@
 set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -1537,10 +1538,9 @@ trim_log() {
 fm_super_main() {
   local STATE
   STATE="$(_state_root)"
-  mkdir -p "$STATE"
-
   # Source the portable lock helpers (works on macOS where flock is absent).
-  # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.
+  # Export FM_STATE_OVERRIDE so the lib resolves the same state dir, and creates
+  # it private at source time - which is why nothing creates it above this.
   # shellcheck source=bin/fm-wake-lib.sh
   FM_STATE_OVERRIDE="$STATE" . "$FM_DAEMON_DIR/fm-wake-lib.sh"
 

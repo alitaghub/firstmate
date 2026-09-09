@@ -181,7 +181,7 @@ EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
 state_root_bind() {  # [create]
   if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then
     [ "${1-}" = create ] || return 1
-    (umask 077; mkdir -p "$STATE") || return 1
+    fm_private_dir_ensure "$STATE" || return 1
   fi
   STATE=$(fm_procevent_state_root_resolve "$STATE") || return 1
   REG=$(fm_procevent_registry_dir "$STATE")

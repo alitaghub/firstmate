@@ -22,6 +22,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -75,7 +76,7 @@ EOF
 
 write_pending_seed() {  # Fail-closed marker before any lifecycle mutation.
   local pending started
-  mkdir -p "$STATE" || return 1
+  fm_private_dir_ensure "$STATE" || return 1
   started=$(awk -F '\t' '$1 == "started" { print $2; exit }' "$GATE" 2>/dev/null || true)
   [ -n "$started" ] || started=$(date +%s)
   pending=$(mktemp "$STATE/.afk-return-catchup.pending.XXXXXX") || return 1
@@ -227,7 +228,7 @@ main() {
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh"
 
-  mkdir -p "$STATE" || return 1
+  fm_private_dir_ensure "$STATE" || return 1
   fm_lock_acquire_wait "$LOCK"
   trap 'fm_lock_release "$LOCK"' EXIT
   write_pending_seed || { fm_lock_release "$LOCK"; trap - EXIT; return 1; }
